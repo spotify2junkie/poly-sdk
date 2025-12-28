@@ -141,6 +141,208 @@ export interface LeaderboardPage {
   limit: number;
 }
 
+// ===== Leaderboard Parameters =====
+
+/**
+ * Time period for leaderboard filtering
+ */
+export type LeaderboardTimePeriod = 'DAY' | 'WEEK' | 'MONTH' | 'ALL';
+
+/**
+ * Ordering criteria for leaderboard
+ */
+export type LeaderboardOrderBy = 'PNL' | 'VOL';
+
+/**
+ * Market category for leaderboard filtering
+ */
+export type LeaderboardCategory =
+  | 'OVERALL'
+  | 'POLITICS'
+  | 'SPORTS'
+  | 'CRYPTO'
+  | 'CULTURE'
+  | 'MENTIONS'
+  | 'WEATHER'
+  | 'ECONOMICS'
+  | 'TECH'
+  | 'FINANCE';
+
+/**
+ * Leaderboard query parameters
+ * @see https://docs.polymarket.com/api-reference/core/get-trader-leaderboard-rankings
+ */
+export interface LeaderboardParams {
+  /** Time period for leaderboard results (default: DAY) */
+  timePeriod?: LeaderboardTimePeriod;
+  /** Ordering criteria (default: PNL) */
+  orderBy?: LeaderboardOrderBy;
+  /** Market category filter (default: OVERALL) */
+  category?: LeaderboardCategory;
+  /** Max number of traders to return (1-50, default: 25) */
+  limit?: number;
+  /** Starting index for pagination (0-1000, default: 0) */
+  offset?: number;
+  /** Filter by specific user address */
+  user?: string;
+  /** Filter by username */
+  userName?: string;
+}
+
+// ===== Parameter Types (P0/P1/P2 Gap Analysis) =====
+
+/**
+ * Activity query parameters
+ * @see https://docs.polymarket.com/developers/misc-endpoints/data-api-activity
+ */
+export interface ActivityParams {
+  /** Maximum number of results (0-500, default: 100) */
+  limit?: number;
+  /** Pagination offset (0-10000) */
+  offset?: number;
+  /** Start timestamp (Unix seconds) - filter activities after this time */
+  start?: number;
+  /** End timestamp (Unix seconds) - filter activities before this time */
+  end?: number;
+  /** Activity type filter */
+  type?: 'TRADE' | 'SPLIT' | 'MERGE' | 'REDEEM' | 'REWARD' | 'CONVERSION';
+  /** Trade side filter */
+  side?: 'BUY' | 'SELL';
+  /** Market condition IDs to filter */
+  market?: string[];
+  /** Event IDs to filter */
+  eventId?: number[];
+  /** Sort field */
+  sortBy?: 'TIMESTAMP' | 'TOKENS' | 'CASH';
+  /** Sort direction */
+  sortDirection?: 'ASC' | 'DESC';
+}
+
+/**
+ * Positions query parameters
+ * @see https://docs.polymarket.com/developers/misc-endpoints/data-api-get-positions
+ */
+export interface PositionsParams {
+  /** Maximum number of results (0-500, default: 100) */
+  limit?: number;
+  /** Pagination offset (0-10000) */
+  offset?: number;
+  /** Market condition IDs to filter */
+  market?: string[];
+  /** Event IDs to filter */
+  eventId?: number[];
+  /** Minimum position size to include (default: 1) */
+  sizeThreshold?: number;
+  /** Only return redeemable positions */
+  redeemable?: boolean;
+  /** Only return mergeable positions */
+  mergeable?: boolean;
+  /** Search by title */
+  title?: string;
+  /** Sort field */
+  sortBy?: 'CURRENT' | 'INITIAL' | 'TOKENS' | 'CASHPNL' | 'PERCENTPNL' | 'TITLE' | 'RESOLVING' | 'PRICE' | 'AVGPRICE';
+  /** Sort direction */
+  sortDirection?: 'ASC' | 'DESC';
+}
+
+/**
+ * Trades query parameters
+ */
+export interface TradesParams {
+  /** Maximum number of results (default: 500) */
+  limit?: number;
+  /** Market condition ID to filter */
+  market?: string;
+  /** User wallet address to filter */
+  user?: string;
+  /** Only return taker trades */
+  takerOnly?: boolean;
+  /** Filter by cash or token amount */
+  filterType?: 'CASH' | 'TOKENS';
+  /** Minimum amount threshold */
+  filterAmount?: number;
+  /** Trade side filter */
+  side?: 'BUY' | 'SELL';
+}
+
+/**
+ * Closed positions query parameters
+ * @see https://docs.polymarket.com/api-reference/core/get-closed-positions-for-a-user
+ */
+export interface ClosedPositionsParams {
+  /** Maximum number of results (0-50, default: 10) */
+  limit?: number;
+  /** Pagination offset (0-100000) */
+  offset?: number;
+  /** Market condition IDs to filter */
+  market?: string[];
+  /** Event IDs to filter */
+  eventId?: number[];
+  /** Search by title (max 100 chars) */
+  title?: string;
+  /** Sort field */
+  sortBy?: 'REALIZEDPNL' | 'TITLE' | 'PRICE' | 'AVGPRICE' | 'TIMESTAMP';
+  /** Sort direction */
+  sortDirection?: 'ASC' | 'DESC';
+}
+
+/**
+ * Closed position entry
+ */
+export interface ClosedPosition {
+  proxyWallet: string;
+  asset: string;
+  conditionId: string;
+
+  // Trade data
+  avgPrice: number;
+  totalBought: number;
+  realizedPnl: number;
+  curPrice: number;  // Settlement price (0 or 1)
+  timestamp: number;
+
+  // Market info
+  title: string;
+  slug?: string;
+  icon?: string;
+  eventSlug?: string;
+  outcome: string;
+  outcomeIndex: number;
+  oppositeOutcome?: string;
+  oppositeAsset?: string;
+  endDate?: string;
+}
+
+/**
+ * Holders query parameters
+ */
+export interface HoldersParams {
+  /** Market condition ID (required) */
+  market: string;
+  /** Maximum number of results */
+  limit?: number;
+}
+
+/**
+ * Account value response
+ */
+export interface AccountValue {
+  user: string;
+  value: number;
+}
+
+/**
+ * Market holder entry
+ */
+export interface MarketHolder {
+  proxyWallet: string;
+  size: number;
+  outcome: string;
+  value?: number;
+  userName?: string;
+  profileImage?: string;
+}
+
 // ===== Client =====
 
 export class DataApiClient {
@@ -153,12 +355,51 @@ export class DataApiClient {
 
   /**
    * Get positions for a wallet address
+   *
+   * @param address - Wallet address
+   * @param params - Query parameters (P0/P1: limit, offset, sortBy, sortDirection, market, etc.)
+   *
+   * @example
+   * ```typescript
+   * // Get all positions
+   * const positions = await client.getPositions(address);
+   *
+   * // Get positions sorted by PnL (highest first)
+   * const topPnl = await client.getPositions(address, {
+   *   sortBy: 'CASHPNL',
+   *   sortDirection: 'DESC',
+   *   limit: 10,
+   * });
+   *
+   * // Get only redeemable positions
+   * const redeemable = await client.getPositions(address, { redeemable: true });
+   * ```
    */
-  async getPositions(address: string): Promise<Position[]> {
+  async getPositions(address: string, params?: PositionsParams): Promise<Position[]> {
     return this.rateLimiter.execute(ApiType.DATA_API, async () => {
-      const response = await fetch(
-        `${DATA_API_BASE}/positions?user=${address}`
-      );
+      const query = new URLSearchParams({ user: address });
+
+      // P0: limit, offset
+      if (params?.limit !== undefined) query.set('limit', String(params.limit));
+      if (params?.offset !== undefined) query.set('offset', String(params.offset));
+
+      // P1: sortBy, sortDirection, market
+      if (params?.sortBy) query.set('sortBy', params.sortBy);
+      if (params?.sortDirection) query.set('sortDirection', params.sortDirection);
+      if (params?.market) {
+        params.market.forEach((m) => query.append('market', m));
+      }
+      if (params?.eventId) {
+        params.eventId.forEach((id) => query.append('eventId', String(id)));
+      }
+
+      // P1: sizeThreshold, redeemable, mergeable, title
+      if (params?.sizeThreshold !== undefined) query.set('sizeThreshold', String(params.sizeThreshold));
+      if (params?.redeemable !== undefined) query.set('redeemable', String(params.redeemable));
+      if (params?.mergeable !== undefined) query.set('mergeable', String(params.mergeable));
+      if (params?.title) query.set('title', params.title);
+
+      const response = await fetch(`${DATA_API_BASE}/positions?${query}`);
       if (!response.ok)
         throw PolymarketError.fromHttpError(
           response.status,
@@ -170,19 +411,104 @@ export class DataApiClient {
   }
 
   /**
-   * Get activity for a wallet address
+   * Get closed positions for a wallet address
+   *
+   * @param address - Wallet address
+   * @param params - Query parameters
+   *
+   * @example
+   * ```typescript
+   * // Get closed positions sorted by realized PnL
+   * const closed = await client.getClosedPositions(address);
+   *
+   * // Get recent settlements
+   * const recent = await client.getClosedPositions(address, {
+   *   sortBy: 'TIMESTAMP',
+   *   sortDirection: 'DESC',
+   *   limit: 20,
+   * });
+   * ```
    */
-  async getActivity(
-    address: string,
-    params?: { limit?: number; type?: string }
-  ): Promise<Activity[]> {
-    const query = new URLSearchParams({
-      user: address,
-      limit: String(params?.limit || 100),
-      ...(params?.type && { type: params.type }),
-    });
-
+  async getClosedPositions(address: string, params?: ClosedPositionsParams): Promise<ClosedPosition[]> {
     return this.rateLimiter.execute(ApiType.DATA_API, async () => {
+      const query = new URLSearchParams({ user: address });
+
+      // Pagination
+      if (params?.limit !== undefined) query.set('limit', String(params.limit));
+      if (params?.offset !== undefined) query.set('offset', String(params.offset));
+
+      // Filters
+      if (params?.market) {
+        params.market.forEach((m) => query.append('market', m));
+      }
+      if (params?.eventId) {
+        params.eventId.forEach((id) => query.append('eventId', String(id)));
+      }
+      if (params?.title) query.set('title', params.title);
+
+      // Sorting
+      if (params?.sortBy) query.set('sortBy', params.sortBy);
+      if (params?.sortDirection) query.set('sortDirection', params.sortDirection);
+
+      const response = await fetch(`${DATA_API_BASE}/closed-positions?${query}`);
+      if (!response.ok)
+        throw PolymarketError.fromHttpError(
+          response.status,
+          await response.json().catch(() => null)
+        );
+      const data = (await response.json()) as unknown[];
+      return this.normalizeClosedPositions(data);
+    });
+  }
+
+  /**
+   * Get activity for a wallet address
+   *
+   * @param address - Wallet address
+   * @param params - Query parameters (P0: start, end, offset; P1: market, sortBy, etc.)
+   *
+   * @example
+   * ```typescript
+   * // Get recent activity
+   * const activity = await client.getActivity(address, { limit: 50 });
+   *
+   * // Get activity in a time range (Unix seconds)
+   * const dayAgo = Math.floor(Date.now() / 1000) - 86400;
+   * const recent = await client.getActivity(address, {
+   *   start: dayAgo,
+   *   limit: 100,
+   * });
+   *
+   * // Paginate through all activity
+   * const page2 = await client.getActivity(address, { offset: 100, limit: 100 });
+   * ```
+   */
+  async getActivity(address: string, params?: ActivityParams): Promise<Activity[]> {
+    return this.rateLimiter.execute(ApiType.DATA_API, async () => {
+      const query = new URLSearchParams({ user: address });
+
+      // Basic params
+      query.set('limit', String(params?.limit ?? 100));
+
+      // P0: offset, start, end (time filtering and pagination)
+      if (params?.offset !== undefined) query.set('offset', String(params.offset));
+      if (params?.start !== undefined) query.set('start', String(params.start));
+      if (params?.end !== undefined) query.set('end', String(params.end));
+
+      // P1: type, side, market, eventId
+      if (params?.type) query.set('type', params.type);
+      if (params?.side) query.set('side', params.side);
+      if (params?.market) {
+        params.market.forEach((m) => query.append('market', m));
+      }
+      if (params?.eventId) {
+        params.eventId.forEach((id) => query.append('eventId', String(id)));
+      }
+
+      // P2: sortBy, sortDirection
+      if (params?.sortBy) query.set('sortBy', params.sortBy);
+      if (params?.sortDirection) query.set('sortDirection', params.sortDirection);
+
       const response = await fetch(`${DATA_API_BASE}/activity?${query}`);
       if (!response.ok)
         throw PolymarketError.fromHttpError(
@@ -194,21 +520,75 @@ export class DataApiClient {
     });
   }
 
+  /**
+   * Get all activity for a wallet (auto-pagination)
+   *
+   * @param address - Wallet address
+   * @param params - Query parameters
+   * @param maxItems - Maximum items to fetch (default: 10000)
+   *
+   * @example
+   * ```typescript
+   * // Get all activity since a specific date
+   * const startDate = Math.floor(new Date('2024-12-01').getTime() / 1000);
+   * const allActivity = await client.getAllActivity(address, { start: startDate });
+   * ```
+   */
+  async getAllActivity(
+    address: string,
+    params?: Omit<ActivityParams, 'offset' | 'limit'>,
+    maxItems = 10000
+  ): Promise<Activity[]> {
+    const all: Activity[] = [];
+    const limit = 500; // Max allowed by API
+    let offset = 0;
+
+    while (all.length < maxItems) {
+      const page = await this.getActivity(address, { ...params, limit, offset });
+      all.push(...page);
+      if (page.length < limit) break; // No more data
+      offset += limit;
+    }
+
+    return all.slice(0, maxItems);
+  }
+
   // ===== Trade-related =====
 
   /**
    * Get recent trades
+   *
+   * @param params - Query parameters (P2: user, side, takerOnly, etc.)
+   *
+   * @example
+   * ```typescript
+   * // Get market trades
+   * const trades = await client.getTrades({ market: conditionId, limit: 100 });
+   *
+   * // Get user trades (P2)
+   * const userTrades = await client.getTrades({ user: address, limit: 50 });
+   *
+   * // Get only buy trades
+   * const buys = await client.getTrades({ market: conditionId, side: 'BUY' });
+   * ```
    */
-  async getTrades(params?: {
-    limit?: number;
-    market?: string;
-  }): Promise<Trade[]> {
-    const query = new URLSearchParams({
-      limit: String(params?.limit || 1000),
-      ...(params?.market && { market: params.market }),
-    });
-
+  async getTrades(params?: TradesParams): Promise<Trade[]> {
     return this.rateLimiter.execute(ApiType.DATA_API, async () => {
+      const query = new URLSearchParams();
+      query.set('limit', String(params?.limit ?? 500));
+
+      // Basic filters
+      if (params?.market) query.set('market', params.market);
+
+      // P2: user filter
+      if (params?.user) query.set('user', params.user);
+
+      // P2: additional filters
+      if (params?.side) query.set('side', params.side);
+      if (params?.takerOnly !== undefined) query.set('takerOnly', String(params.takerOnly));
+      if (params?.filterType) query.set('filterType', params.filterType);
+      if (params?.filterAmount !== undefined) query.set('filterAmount', String(params.filterAmount));
+
       const response = await fetch(`${DATA_API_BASE}/trades?${query}`);
       if (!response.ok)
         throw PolymarketError.fromHttpError(
@@ -227,24 +607,61 @@ export class DataApiClient {
     return this.getTrades({ market: conditionId, limit });
   }
 
+  /**
+   * Get trades for a specific user (P2)
+   */
+  async getTradesByUser(address: string, params?: Omit<TradesParams, 'user'>): Promise<Trade[]> {
+    return this.getTrades({ ...params, user: address });
+  }
+
   // ===== Leaderboard =====
 
   /**
-   * Get leaderboard page
+   * Get leaderboard page with time period and ordering support
+   *
+   * @param params - Query parameters
+   * @param params.timePeriod - Time period: 'DAY', 'WEEK', 'MONTH', 'ALL' (default: 'ALL' for backward compatibility)
+   * @param params.orderBy - Order by: 'PNL', 'VOL' (default: 'PNL')
+   * @param params.category - Category filter (default: 'OVERALL')
+   * @param params.limit - Max entries per page (1-50, default: 50)
+   * @param params.offset - Pagination offset (0-1000, default: 0)
+   *
+   * @example
+   * ```typescript
+   * // Get today's top traders by PnL
+   * const daily = await client.getLeaderboard({ timePeriod: 'DAY', orderBy: 'PNL' });
+   *
+   * // Get this week's top traders by volume
+   * const weekly = await client.getLeaderboard({ timePeriod: 'WEEK', orderBy: 'VOL' });
+   *
+   * // Get politics category leaderboard
+   * const politics = await client.getLeaderboard({ category: 'POLITICS' });
+   * ```
    */
-  async getLeaderboard(params?: {
-    limit?: number;
-    offset?: number;
-  }): Promise<LeaderboardPage> {
-    const limit = params?.limit || 50;
-    const offset = params?.offset || 0;
-    const cacheKey = `leaderboard:${offset}:${limit}`;
+  async getLeaderboard(params?: LeaderboardParams): Promise<LeaderboardPage> {
+    const {
+      timePeriod = 'ALL', // Default to ALL for backward compatibility
+      orderBy = 'PNL',
+      category = 'OVERALL',
+      limit = 50,
+      offset = 0,
+      user,
+      userName,
+    } = params || {};
+
+    const cacheKey = `leaderboard:${timePeriod}:${orderBy}:${category}:${offset}:${limit}`;
 
     return this.cache.getOrSet(cacheKey, CACHE_TTL.LEADERBOARD, async () => {
       const query = new URLSearchParams({
+        timePeriod,
+        orderBy,
+        category,
         limit: String(limit),
         offset: String(offset),
       });
+
+      if (user) query.set('user', user);
+      if (userName) query.set('userName', userName);
 
       return this.rateLimiter.execute(ApiType.DATA_API, async () => {
         const response = await fetch(
@@ -285,6 +702,79 @@ export class DataApiClient {
     }
 
     return all.slice(0, maxEntries);
+  }
+
+  // ===== Value & Holders (P1/P2) =====
+
+  /**
+   * Get account total value (P1)
+   *
+   * @param address - Wallet address
+   * @param markets - Optional: filter by specific markets
+   *
+   * @example
+   * ```typescript
+   * const { value } = await client.getAccountValue(address);
+   * console.log(`Total account value: $${value.toFixed(2)}`);
+   * ```
+   */
+  async getAccountValue(address: string, markets?: string[]): Promise<AccountValue> {
+    return this.rateLimiter.execute(ApiType.DATA_API, async () => {
+      const query = new URLSearchParams({ user: address });
+      if (markets) {
+        markets.forEach((m) => query.append('market', m));
+      }
+
+      const response = await fetch(`${DATA_API_BASE}/value?${query}`);
+      if (!response.ok)
+        throw PolymarketError.fromHttpError(
+          response.status,
+          await response.json().catch(() => null)
+        );
+
+      // API returns array: [{ user, value }]
+      const data = (await response.json()) as Array<{ user: string; value: number }>;
+      if (Array.isArray(data) && data.length > 0) {
+        return {
+          user: String(data[0].user),
+          value: Number(data[0].value) || 0,
+        };
+      }
+      return { user: address, value: 0 };
+    });
+  }
+
+  /**
+   * Get market holders (P2)
+   *
+   * Returns top holders for a specific market. Note: This endpoint can timeout
+   * for large markets.
+   *
+   * @param params - Query parameters (market is required)
+   *
+   * @example
+   * ```typescript
+   * const holders = await client.getMarketHolders({
+   *   market: conditionId,
+   *   limit: 20,
+   * });
+   * ```
+   */
+  async getMarketHolders(params: HoldersParams): Promise<MarketHolder[]> {
+    return this.rateLimiter.execute(ApiType.DATA_API, async () => {
+      const query = new URLSearchParams({ market: params.market });
+      if (params.limit !== undefined) query.set('limit', String(params.limit));
+
+      const response = await fetch(`${DATA_API_BASE}/holders?${query}`);
+      if (!response.ok)
+        throw PolymarketError.fromHttpError(
+          response.status,
+          await response.json().catch(() => null)
+        );
+
+      const data = (await response.json()) as unknown[];
+      return this.normalizeHolders(data);
+    });
   }
 
   // ===== Data Normalization =====
@@ -343,6 +833,41 @@ export class DataApiClient {
         mergeable: p.mergeable !== undefined ? Boolean(p.mergeable) : undefined,
         endDate: p.endDate !== undefined ? String(p.endDate) : undefined,
         negativeRisk: p.negativeRisk !== undefined ? Boolean(p.negativeRisk) : undefined,
+      };
+    });
+  }
+
+  private normalizeClosedPositions(data: unknown[]): ClosedPosition[] {
+    if (!Array.isArray(data)) return [];
+    return data.map((item) => {
+      const p = item as Record<string, unknown>;
+      return {
+        proxyWallet: String(p.proxyWallet || ''),
+        asset: String(p.asset || ''),
+        conditionId: String(p.conditionId || ''),
+
+        // Trade data
+        avgPrice: Number(p.avgPrice) || 0,
+        totalBought: Number(p.totalBought) || 0,
+        realizedPnl: Number(p.realizedPnl) || 0,
+        curPrice: Number(p.curPrice) || 0,
+        timestamp: this.normalizeTimestamp(p.timestamp),
+
+        // Market info
+        title: String(p.title || ''),
+        slug: p.slug !== undefined ? String(p.slug) : undefined,
+        icon: p.icon !== undefined ? String(p.icon) : undefined,
+        eventSlug: p.eventSlug !== undefined ? String(p.eventSlug) : undefined,
+        outcome: String(p.outcome || ''),
+        outcomeIndex:
+          typeof p.outcomeIndex === 'number'
+            ? p.outcomeIndex
+            : p.outcome === 'Yes'
+              ? 0
+              : 1,
+        oppositeOutcome: p.oppositeOutcome !== undefined ? String(p.oppositeOutcome) : undefined,
+        oppositeAsset: p.oppositeAsset !== undefined ? String(p.oppositeAsset) : undefined,
+        endDate: p.endDate !== undefined ? String(p.endDate) : undefined,
       };
     });
   }
@@ -463,6 +988,21 @@ export class DataApiClient {
         // Activity counts (optional - API often returns null)
         positions: e.positions != null ? Number(e.positions) : undefined,
         trades: e.trades != null ? Number(e.trades) : undefined,
+      };
+    });
+  }
+
+  private normalizeHolders(data: unknown[]): MarketHolder[] {
+    if (!Array.isArray(data)) return [];
+    return data.map((item) => {
+      const h = item as Record<string, unknown>;
+      return {
+        proxyWallet: String(h.proxyWallet || h.address || ''),
+        size: Number(h.size) || 0,
+        outcome: String(h.outcome || ''),
+        value: h.value !== undefined ? Number(h.value) : undefined,
+        userName: h.userName !== undefined ? String(h.userName) : undefined,
+        profileImage: h.profileImage !== undefined ? String(h.profileImage) : undefined,
       };
     });
   }

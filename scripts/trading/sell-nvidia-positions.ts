@@ -17,13 +17,11 @@ import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { ethers } from 'ethers';
 import {
-  TradingClient,
+  TradingService,
   RateLimiter,
-  ClobApiClient,
-  DataApiClient,
-  Cache,
+  createUnifiedCache,
   CTFClient,
-} from '../src/index.js';
+} from '../../src/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -64,11 +62,9 @@ async function main() {
   console.log('');
 
   const rateLimiter = new RateLimiter();
-  const cache = new Cache();
+  const cache = createUnifiedCache();
   const ctf = new CTFClient({ privateKey: PRIVATE_KEY });
-  const trading = new TradingClient(rateLimiter, { privateKey: PRIVATE_KEY });
-  const clobApi = new ClobApiClient(rateLimiter, cache);
-  const dataApi = new DataApiClient(rateLimiter, cache);
+  const tradingService = new TradingService(rateLimiter, cache, { privateKey: PRIVATE_KEY });
 
   const address = ctf.getAddress();
   console.log(`Wallet: ${address}`);
@@ -93,11 +89,11 @@ async function main() {
   console.log('');
 
   // Get market prices
-  const orderbook = await clobApi.getOrderbook(NVIDIA_MARKET.yesTokenId);
+  const orderbook = await tradingService.getProcessedOrderbook(NVIDIA_MARKET.yesTokenId);
   const yesBid = orderbook?.bids?.[0]?.price ?? 0;
   const yesAsk = orderbook?.asks?.[0]?.price ?? 1;
 
-  const noOrderbook = await clobApi.getOrderbook(NVIDIA_MARKET.noTokenId);
+  const noOrderbook = await tradingService.getProcessedOrderbook(NVIDIA_MARKET.noTokenId);
   const noBid = noOrderbook?.bids?.[0]?.price ?? 0;
   const noAsk = noOrderbook?.asks?.[0]?.price ?? 1;
 
@@ -121,18 +117,18 @@ async function main() {
     return;
   }
 
-  // Initialize trading client
+  // Initialize trading service
   console.log('─── Executing Trades ───');
-  console.log('Initializing trading client...');
-  await trading.initialize();
-  console.log('Trading client ready.');
+  console.log('Initializing trading service...');
+  await tradingService.initialize();
+  console.log('Trading service ready.');
   console.log('');
 
   // Sell YES tokens if we have any
   if (parseFloat(yesBalance) >= 1) {
     console.log(`Selling ${parseFloat(yesBalance).toFixed(2)} YES tokens...`);
     try {
-      const result = await trading.createMarketOrder({
+      const result = await tradingService.createMarketOrder({
         tokenId: NVIDIA_MARKET.yesTokenId,
         side: 'SELL',
         amount: parseFloat(yesBalance),
@@ -160,7 +156,7 @@ async function main() {
   if (parseFloat(noBalance) >= 1) {
     console.log(`Selling ${parseFloat(noBalance).toFixed(2)} NO tokens...`);
     try {
-      const result = await trading.createMarketOrder({
+      const result = await tradingService.createMarketOrder({
         tokenId: NVIDIA_MARKET.noTokenId,
         side: 'SELL',
         amount: parseFloat(noBalance),

@@ -5,10 +5,10 @@
  * 测试 GTC 限价单 vs FOK 市价单的区别
  *
  * Usage:
- *   POLY_PRIVKEY=0x... npx tsx scripts/test-order.ts
+ *   POLY_PRIVKEY=0x... npx tsx scripts/trading/test-order.ts
  */
 
-import { TradingClient, RateLimiter, ClobApiClient } from '../src/index.js';
+import { TradingService, RateLimiter, createUnifiedCache } from '../../src/index.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
@@ -47,23 +47,23 @@ async function main() {
   console.log('');
 
   const rateLimiter = new RateLimiter();
-  const tradingClient = new TradingClient(rateLimiter, {
+  const cache = createUnifiedCache();
+  const tradingService = new TradingService(rateLimiter, cache, {
     privateKey: PRIVATE_KEY,
     chainId: 137,
   });
 
-  await tradingClient.initialize();
-  console.log(`Wallet: ${tradingClient.getAddress()}`);
+  await tradingService.initialize();
+  console.log(`Wallet: ${tradingService.getAddress()}`);
 
   // 获取当前余额
-  const { balance, allowance } = await tradingClient.getBalanceAllowance('COLLATERAL');
+  const { balance, allowance } = await tradingService.getBalanceAllowance('COLLATERAL');
   console.log(`USDC Balance: ${(parseFloat(balance) / 1e6).toFixed(2)} USDC`);
   console.log(`Allowance: ${allowance === 'unlimited' || parseFloat(allowance) / 1e6 > 1e12 ? 'Unlimited' : (parseFloat(allowance) / 1e6).toFixed(2)}`);
   console.log('');
 
   // 获取当前市场价格
-  const clobClient = new ClobApiClient(rateLimiter);
-  const orderbook = await clobClient.getOrderbook(TEST_MARKET.yesTokenId);
+  const orderbook = await tradingService.getProcessedOrderbook(TEST_MARKET.yesTokenId);
   const bestBid = orderbook.bids[0]?.price || 0;
   const bestAsk = orderbook.asks[0]?.price || 1;
   console.log(`Current YES price: ${bestBid.toFixed(3)} / ${bestAsk.toFixed(3)}`);
@@ -84,7 +84,7 @@ async function main() {
   console.log(`Expected cost: $${(gtcSize * gtcBuyPrice).toFixed(2)}`);
 
   try {
-    const gtcResult = await tradingClient.createOrder({
+    const gtcResult = await tradingService.createOrder({
       tokenId: TEST_MARKET.yesTokenId,
       side: 'BUY',
       price: gtcBuyPrice,
@@ -98,7 +98,7 @@ async function main() {
 
       // 立即取消订单
       console.log('   Cancelling order...');
-      const cancelResult = await tradingClient.cancelOrder(gtcResult.orderId!);
+      const cancelResult = await tradingService.cancelOrder(gtcResult.orderId!);
       console.log(`   Cancel: ${cancelResult.success ? '✓' : '✗'}`);
     } else {
       console.log(`❌ GTC Order FAILED: ${gtcResult.errorMsg}`);
@@ -119,7 +119,7 @@ async function main() {
   console.log(`Placing FOK BUY order: $${TEST_AMOUNT} USDC worth`);
 
   try {
-    const fokResult = await tradingClient.createMarketOrder({
+    const fokResult = await tradingService.createMarketOrder({
       tokenId: TEST_MARKET.yesTokenId,
       side: 'BUY',
       amount: TEST_AMOUNT,
@@ -135,7 +135,7 @@ async function main() {
 
       // 检查持仓并卖出
       console.log('   Selling back...');
-      const sellResult = await tradingClient.createMarketOrder({
+      const sellResult = await tradingService.createMarketOrder({
         tokenId: TEST_MARKET.yesTokenId,
         side: 'SELL',
         amount: TEST_AMOUNT * 0.95, // 卖出略少一点确保成功

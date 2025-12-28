@@ -42,11 +42,15 @@ if (arb) {
 │                             PolymarketSDK                                     │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │  Layer 3: Services                                                            │
-│  ┌─────────────┐ ┌─────────────┐ ┌───────────────┐ ┌─────────────────────────┐│
-│  │WalletService│ │MarketService│ │RealtimeService│ │   AuthorizationService  ││
-│  │ - profiles  │ │ - K-Lines   │ │- subscriptions│ │   - ERC20 approvals     ││
-│  │ - sell det. │ │ - signals   │ │- price cache  │ │   - ERC1155 approvals   ││
-│  └─────────────┘ └─────────────┘ └───────────────┘ └─────────────────────────┘│
+│  ┌─────────────┐ ┌─────────────┐ ┌────────────────┐ ┌───────────────────────┐│
+│  │WalletService│ │MarketService│ │RealtimeServiceV2│ │ AuthorizationService ││
+│  │ - profiles  │ │ - K-Lines   │ │- official WS   │ │ - ERC20 approvals    ││
+│  │ - sell det. │ │ - signals   │ │- price cache   │ │ - ERC1155 approvals  ││
+│  └─────────────┘ └─────────────┘ └────────────────┘ └───────────────────────┘│
+│  ┌─────────────────────────────────────────────────────────────────────────┐  │
+│  │ TradingService: Unified trading via @polymarket/clob-client              │  │
+│  │ GTC/GTD/FOK/FAK orders, rewards, balance queries, price history         │  │
+│  └─────────────────────────────────────────────────────────────────────────┘  │
 │  ┌─────────────────────────────────────────────────────────────────────────┐  │
 │  │ ArbitrageService: Real-time arbitrage detection, rebalancer, settlement │  │
 │  └─────────────────────────────────────────────────────────────────────────┘  │
@@ -54,16 +58,17 @@ if (arb) {
 │  │ SwapService: DEX swaps on Polygon (QuickSwap V3, USDC/USDC.e conversion)│  │
 │  └─────────────────────────────────────────────────────────────────────────┘  │
 ├──────────────────────────────────────────────────────────────────────────────┤
-│  Layer 2: API Clients                                                         │
-│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌───────────┐ ┌────────────────────┐  │
-│  │ DataAPI  │ │ GammaAPI │ │ CLOB API │ │ WebSocket │ │   BridgeClient     │  │
-│  │positions │ │ markets  │ │ orderbook│ │ real-time │ │   cross-chain      │  │
-│  │ trades   │ │ events   │ │ trading  │ │ prices    │ │   deposits         │  │
-│  └──────────┘ └──────────┘ └──────────┘ └───────────┘ └────────────────────┘  │
-│  ┌──────────────────────────────────────┐ ┌────────────────────────────────┐  │
-│  │ TradingClient: Order execution       │ │ CTFClient: On-chain operations │  │
-│  │ GTC/GTD/FOK/FAK, rewards, balances   │ │ Split / Merge / Redeem tokens  │  │
-│  └──────────────────────────────────────┘ └────────────────────────────────┘  │
+│  Layer 2: Clients                                                             │
+│  ┌──────────────────────────────────────────────────────────────────────────┐ │
+│  │ OFFICIAL POLYMARKET CLIENTS                                               │ │
+│  │  @polymarket/clob-client: Trading, orderbook, market data, rewards       │ │
+│  │  @polymarket/real-time-data-client: WebSocket real-time updates          │ │
+│  └──────────────────────────────────────────────────────────────────────────┘ │
+│  ┌──────────┐ ┌──────────┐ ┌────────────────┐ ┌────────────┐ ┌────────────┐  │
+│  │ DataAPI  │ │ GammaAPI │ │ SubgraphClient │ │ CTFClient  │ │BridgeClient│  │
+│  │positions │ │ markets  │ │  on-chain data │ │split/merge │ │cross-chain │  │
+│  │ trades   │ │ events   │ │  PnL, OI, fills│ │  redeem    │ │  deposits  │  │
+│  └──────────┘ └──────────┘ └────────────────┘ └────────────┘ └────────────┘  │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │  Layer 1: Infrastructure                                                      │
 │  ┌────────────┐  ┌─────────┐  ┌──────────┐  ┌────────────┐ ┌──────────────┐   │
@@ -71,6 +76,33 @@ if (arb) {
 │  │per-API     │  │TTL-based│  │ retry    │  │ unified    │ │ arb detect   │   │
 │  └────────────┘  └─────────┘  └──────────┘  └────────────┘ └──────────────┘   │
 └──────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Architecture Changes (v1.0)
+
+The SDK has been refactored to use official Polymarket clients:
+
+| Removed | Replaced By | Notes |
+|---------|-------------|-------|
+| `ClobApiClient` | `TradingService` | Uses `@polymarket/clob-client` internally |
+| `TradingClient` | `TradingService` | Unified service with market data |
+| `RealtimeService` | `RealtimeServiceV2` | Uses `@polymarket/real-time-data-client` |
+| `WebSocketManager` | `RealtimeServiceV2` | Unified WebSocket service |
+| `@nevuamarkets/poly-websockets` | Official WS client | Removed third-party dependency |
+
+**Migration Guide:**
+```typescript
+// Before (v0.x)
+import { TradingClient, ClobApiClient, RealtimeService } from '@catalyst-team/poly-sdk';
+const trading = new TradingClient(rateLimiter, { privateKey });
+const clob = new ClobApiClient(rateLimiter);
+const orderbook = await clob.getOrderbook(tokenId);
+
+// After (v1.0)
+import { TradingService, RealtimeServiceV2, createUnifiedCache } from '@catalyst-team/poly-sdk';
+const cache = createUnifiedCache();
+const tradingService = new TradingService(rateLimiter, cache, { privateKey });
+const orderbook = await tradingService.getProcessedOrderbook(tokenId);
 ```
 
 ## API Clients
@@ -101,16 +133,87 @@ const trending = await sdk.gammaApi.getTrendingMarkets(10);
 const events = await sdk.gammaApi.getEvents({ limit: 20 });
 ```
 
-### ClobApiClient - Orderbook, Trading
+### TradingService - Unified Trading Interface
+
+> **Note**: `TradingService` replaces the old `TradingClient` and `ClobApiClient`, using `@polymarket/clob-client` internally.
 
 ```typescript
-// Get orderbook
-const book = await sdk.clobApi.getOrderbook(conditionId);
+// Get orderbook via TradingService
+const book = await sdk.trading.getOrderbook(tokenId);
 
-// Get processed orderbook with analytics
-const processed = await sdk.clobApi.getProcessedOrderbook(conditionId);
+// Get processed orderbook with analytics via MarketService
+const processed = await sdk.markets.getProcessedOrderbook(conditionId);
 console.log(processed.summary.longArbProfit);
 console.log(processed.summary.shortArbProfit);
+
+// Price history (new capability from official client)
+const prices = await sdk.trading.getPricesHistory({
+  market: tokenId,
+  interval: '1h',
+  fidelity: 60 // minutes per data point
+});
+```
+
+### SubgraphClient - On-Chain Data via Goldsky
+
+Access on-chain data through Polymarket's 5 Subgraphs hosted on Goldsky.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  Subgraph           │ 数据                    │ 用途                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  PnL (0.0.14)       │ UserPosition, Condition │ 链上持仓、已实现 PnL、结算状态    │
+│  Activity (0.0.4)   │ Split, Merge, Redemption│ 链上操作事件                    │
+│  OI (0.0.6)         │ MarketOI, GlobalOI      │ 市场/全局 Open Interest         │
+│  Orderbook (0.0.1)  │ OrderFilledEvent        │ 订单成交事件                    │
+│  Positions (0.0.7)  │ UserBalance             │ 用户余额                        │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Data API vs Subgraph 区别:**
+- **Data API** (sdk.dataApi): Off-chain 数据，更新快，有 userName/profileImage
+- **Subgraph** (sdk.subgraph): On-chain 数据，更准确，有结算状态
+
+```typescript
+// PnL Subgraph - 链上持仓和 PnL
+const positions = await sdk.subgraph.getUserPositions(address, { first: 10 });
+for (const pos of positions) {
+  console.log(`Token: ${pos.tokenId}, Amount: ${pos.amount}, PnL: ${pos.realizedPnl}`);
+}
+
+// 检查 Condition 是否已结算
+const isResolved = await sdk.subgraph.isConditionResolved(conditionId);
+if (isResolved) {
+  const condition = await sdk.subgraph.getCondition(conditionId);
+  console.log(`Payout: ${condition.payoutNumerators}/${condition.payoutDenominator}`);
+}
+
+// Activity Subgraph - 链上操作事件
+const redemptions = await sdk.subgraph.getRecentRedemptions({ first: 10 });
+for (const r of redemptions) {
+  console.log(`${r.redeemer} redeemed ${r.payout} from ${r.condition}`);
+}
+
+// OI Subgraph - Open Interest
+const globalOI = await sdk.subgraph.getGlobalOpenInterest();
+console.log(`Global OI: $${Number(BigInt(globalOI) / BigInt(1e6)).toLocaleString()}`);
+
+const topMarkets = await sdk.subgraph.getTopMarketsByOI({ first: 10 });
+for (const m of topMarkets) {
+  const oi = Number(BigInt(m.amount) / BigInt(1e6));
+  console.log(`${m.id}: $${oi.toLocaleString()}`);
+}
+
+// Orderbook Subgraph - 成交事件
+const fills = await sdk.subgraph.getOrderFilledEvents({ first: 20 });
+const makerFills = await sdk.subgraph.getMakerFills(address, { first: 10 });
+
+// 综合查询 - 用户完整链上活动
+const summary = await sdk.subgraph.getUserActivitySummary(address);
+console.log(`Positions: ${summary.positions.length}`);
+console.log(`Splits: ${summary.splits.length}`);
+console.log(`Redemptions: ${summary.redemptions.length}`);
+console.log(`Maker Fills: ${summary.makerFills.length}`);
 ```
 
 ## Services
@@ -300,21 +403,22 @@ interface OrderbookSummary {
 }
 ```
 
-### TradingClient - Order Execution
+### TradingService - Order Execution
+
+> **Note**: `TradingService` replaces the deprecated `TradingClient`. It uses `@polymarket/clob-client` internally.
 
 ```typescript
-import { TradingClient, RateLimiter } from '@catalyst-team/poly-sdk';
+import { TradingService } from '@catalyst-team/poly-sdk';
 
-const rateLimiter = new RateLimiter();
-const tradingClient = new TradingClient(rateLimiter, {
+const tradingService = new TradingService({
   privateKey: process.env.POLYMARKET_PRIVATE_KEY!,
 });
 
-await tradingClient.initialize();
-console.log(`Wallet: ${tradingClient.getAddress()}`);
+await tradingService.initialize();
+console.log(`Wallet: ${tradingService.getAddress()}`);
 
 // GTC Limit Order (stays until filled or cancelled)
-const order = await tradingClient.createOrder({
+const order = await tradingService.createLimitOrder({
   tokenId: yesTokenId,
   side: 'BUY',
   price: 0.45,
@@ -323,7 +427,7 @@ const order = await tradingClient.createOrder({
 });
 
 // GTD Limit Order (expires at timestamp)
-const gtdOrder = await tradingClient.createOrder({
+const gtdOrder = await tradingService.createLimitOrder({
   tokenId: yesTokenId,
   side: 'BUY',
   price: 0.45,
@@ -333,7 +437,7 @@ const gtdOrder = await tradingClient.createOrder({
 });
 
 // FOK Market Order (fill entirely or cancel)
-const marketOrder = await tradingClient.createMarketOrder({
+const marketOrder = await tradingService.createMarketOrder({
   tokenId: yesTokenId,
   side: 'BUY',
   amount: 10, // $10 USDC
@@ -341,7 +445,7 @@ const marketOrder = await tradingClient.createMarketOrder({
 });
 
 // FAK Market Order (partial fill ok)
-const fakOrder = await tradingClient.createMarketOrder({
+const fakOrder = await tradingService.createMarketOrder({
   tokenId: yesTokenId,
   side: 'SELL',
   amount: 10, // 10 shares
@@ -349,22 +453,22 @@ const fakOrder = await tradingClient.createMarketOrder({
 });
 
 // Order management
-const openOrders = await tradingClient.getOpenOrders();
-await tradingClient.cancelOrder(orderId);
-await tradingClient.cancelAllOrders();
+const openOrders = await tradingService.getOpenOrders();
+await tradingService.cancelOrder(orderId);
+await tradingService.cancelAllOrders();
 
 // Get trade history
-const trades = await tradingClient.getTrades();
+const trades = await tradingService.getTrades();
 ```
 
 ### Rewards - Market Making Incentives
 
 ```typescript
 // Check if your orders are earning rewards
-const isScoring = await tradingClient.isOrderScoring(orderId);
+const isScoring = await tradingService.isOrderScoring(orderId);
 
 // Get markets with active reward programs
-const rewards = await tradingClient.getCurrentRewards();
+const rewards = await tradingService.getCurrentRewards();
 for (const reward of rewards) {
   console.log(`${reward.question}`);
   console.log(`  Max Spread: ${reward.rewardsMaxSpread}`);
@@ -372,15 +476,23 @@ for (const reward of rewards) {
 }
 
 // Get your daily earnings
-const earnings = await tradingClient.getTotalEarningsForDay('2024-12-07');
+const earnings = await tradingService.getEarnings('2024-12-07');
 console.log(`Total earned: $${earnings.totalEarnings}`);
 
 // Check balance and allowance
-const balance = await tradingClient.getBalanceAllowance('COLLATERAL');
+const balance = await tradingService.getBalanceAllowance('COLLATERAL');
 console.log(`USDC Balance: ${balance.balance}`);
 ```
 
-### RealtimeService - WebSocket Subscriptions
+### RealtimeServiceV2 - WebSocket Subscriptions
+
+> **Note**: `RealtimeServiceV2` replaces the old `RealtimeService` + `WebSocketManager`. It uses `@polymarket/real-time-data-client` internally.
+
+**Key Changes**:
+- Uses official Polymarket WebSocket client
+- Removed dependency on `@nevuamarkets/poly-websockets`
+- Built-in derived price calculation (Polymarket display logic)
+- Supports user events (order/trade notifications with auth)
 
 ⚠️ **重要：Orderbook 自动排序**
 
@@ -395,45 +507,52 @@ Polymarket CLOB API 返回的 orderbook 顺序与标准预期相反：
 这意味着你可以安全地使用 `bids[0]` 和 `asks[0]` 获取最优价格：
 
 ```typescript
-const book = await sdk.clobApi.getOrderbook(conditionId);
+const book = await sdk.trading.getOrderbook(tokenId);
 const bestBid = book.bids[0]?.price;  // ✅ 最高买价 (最佳 bid)
 const bestAsk = book.asks[0]?.price;  // ✅ 最低卖价 (最佳 ask)
 
 // WebSocket 更新同样自动排序
-wsManager.on('bookUpdate', (update) => {
+realtime.on('bookUpdate', (update) => {
   const bestBid = update.bids[0]?.price;  // ✅ 已排序
   const bestAsk = update.asks[0]?.price;  // ✅ 已排序
 });
 ```
 
 ```typescript
-import { WebSocketManager, RealtimeService } from '@catalyst-team/poly-sdk';
+import { RealtimeServiceV2 } from '@catalyst-team/poly-sdk';
 
-const wsManager = new WebSocketManager();
-const realtime = new RealtimeService(wsManager);
+const realtime = new RealtimeServiceV2({
+  autoReconnect: true,
+  pingInterval: 5000
+});
 
-// Subscribe to market updates
-const subscription = await realtime.subscribeMarket(yesTokenId, noTokenId, {
-  onPriceUpdate: (update) => {
-    console.log(`${update.assetId}: ${update.price}`);
-  },
-  onBookUpdate: (update) => {
-    console.log(`Best bid: ${update.bids[0]?.price}`);
-  },
-  onLastTrade: (trade) => {
-    console.log(`Trade: ${trade.side} ${trade.size} @ ${trade.price}`);
-  },
-  onPairUpdate: (update) => {
-    console.log(`YES + NO = ${update.spread}`);
-    if (update.spread < 0.99) console.log('ARB opportunity!');
-  },
+// Connect and subscribe to market updates
+realtime.connect();
+realtime.subscribeMarket([yesTokenId, noTokenId]);
+
+// Event-based API
+realtime.on('priceUpdate', (update) => {
+  console.log(`${update.assetId}: ${update.price}`);
+  console.log(`Midpoint: ${update.midpoint}, Spread: ${update.spread}`);
+});
+
+realtime.on('bookUpdate', (update) => {
+  console.log(`Best bid: ${update.bids[0]?.price}`);
+});
+
+realtime.on('lastTrade', (trade) => {
+  console.log(`Trade: ${trade.side} ${trade.size} @ ${trade.price}`);
 });
 
 // Get cached prices
 const price = realtime.getPrice(yesTokenId);
+const book = realtime.getBook(yesTokenId);
+
+// Subscribe to user events (requires authentication)
+realtime.subscribeUser(credentials);
 
 // Cleanup
-await subscription.unsubscribe();
+realtime.disconnect();
 ```
 
 ### CTFClient - On-Chain Token Operations (Split/Merge/Redeem)
@@ -990,6 +1109,20 @@ import type {
   GammaMarket,
   ClobMarket,
   Orderbook,
+
+  // Subgraph types (on-chain data)
+  SubgraphName,
+  SubgraphQueryParams,
+  UserPosition,        // PnL subgraph
+  Condition,           // PnL subgraph
+  UserBalance,         // Positions subgraph
+  Split,               // Activity subgraph
+  Merge,               // Activity subgraph
+  Redemption,          // Activity subgraph
+  MarketOpenInterest,  // OI subgraph
+  GlobalOpenInterest,  // OI subgraph
+  OrderFilledEvent,    // Orderbook subgraph
+  MarketData,          // Orderbook subgraph
 } from '@catalyst-team/poly-sdk';
 ```
 
@@ -1075,7 +1208,8 @@ pnpm example:trading
 
 ## Dependencies
 
-- `@nevuamarkets/poly-websockets` - WebSocket client
+- `@polymarket/clob-client` - Official CLOB trading client
+- `@polymarket/real-time-data-client` - Official WebSocket client
 - `bottleneck` - Rate limiting
 - `ethers` - Blockchain interactions (for CTFClient)
 

@@ -20,11 +20,15 @@
  */
 
 import { EventEmitter } from 'events';
-import { WebSocketManager } from '../clients/websocket-manager.js';
+import {
+  RealtimeServiceV2,
+  type MarketSubscription,
+  type OrderbookSnapshot,
+} from './realtime-service-v2.js';
+import { TradingService } from './trading-service.js';
+import { MarketService } from './market-service.js';
 import { CTFClient, type TokenIds } from '../clients/ctf-client.js';
-import { TradingClient } from '../clients/trading-client.js';
 import { GammaApiClient } from '../clients/gamma-api.js';
-import { ClobApiClient } from '../clients/clob-api.js';
 import { RateLimiter } from '../core/rate-limiter.js';
 import { createUnifiedCache } from '../core/unified-cache.js';
 import { getEffectivePrices } from '../utils/price-utils.js';
@@ -242,9 +246,10 @@ export interface ArbitrageServiceEvents {
 // ===== ArbitrageService =====
 
 export class ArbitrageService extends EventEmitter {
-  private wsManager: WebSocketManager;
+  private realtimeService: RealtimeServiceV2;
+  private marketSubscription: MarketSubscription | null = null;
   private ctf: CTFClient | null = null;
-  private tradingClient: TradingClient | null = null;
+  private tradingService: TradingService | null = null;
   private rateLimiter: RateLimiter;
 
   private market: ArbitrageMarketConfig | null = null;
@@ -313,7 +318,7 @@ export class ArbitrageService extends EventEmitter {
     };
 
     this.rateLimiter = new RateLimiter();
-    this.wsManager = new WebSocketManager({ enableLogging: false });
+    this.realtimeService = new RealtimeServiceV2({ debug: false });
 
     // Initialize trading clients if private key provided
     if (this.config.privateKey) {
@@ -322,15 +327,14 @@ export class ArbitrageService extends EventEmitter {
         rpcUrl: this.config.rpcUrl,
       });
 
-      this.tradingClient = new TradingClient(this.rateLimiter, {
+      const cache = createUnifiedCache();
+      this.tradingService = new TradingService(this.rateLimiter, cache, {
         privateKey: this.config.privateKey,
         chainId: 137,
       });
     }
 
-    // Set up WebSocket event handlers
-    this.wsManager.on('bookUpdate', this.handleBookUpdate.bind(this));
-    this.wsManager.on('error', (error) => this.emit('error', error));
+    // RealtimeServiceV2 event handlers are set up during subscription
   }
 
   // ===== Public API =====
@@ -352,9 +356,9 @@ export class ArbitrageService extends EventEmitter {
     this.log(`Profit Threshold: ${(this.config.profitThreshold * 100).toFixed(2)}%`);
     this.log(`Auto Execute: ${this.config.autoExecute ? 'YES' : 'NO'}`);
 
-    // Initialize trading client
-    if (this.tradingClient) {
-      await this.tradingClient.initialize();
+    // Initialize trading service
+    if (this.tradingService) {
+      await this.tradingService.initialize();
       this.log(`Wallet: ${this.ctf?.getAddress()}`);
       await this.updateBalance();
       this.log(`USDC Balance: ${this.balance.usdc.toFixed(2)}`);
@@ -381,8 +385,24 @@ export class ArbitrageService extends EventEmitter {
       this.log('No wallet configured - monitoring only');
     }
 
-    // Subscribe to WebSocket
-    await this.wsManager.subscribe([market.yesTokenId, market.noTokenId]);
+    // Connect and subscribe to WebSocket
+    this.realtimeService.connect();
+    this.marketSubscription = this.realtimeService.subscribeMarkets(
+      [market.yesTokenId, market.noTokenId],
+      {
+        onOrderbook: (book: OrderbookSnapshot) => {
+          // Convert OrderbookSnapshot to BookUpdate format
+          const bookUpdate: BookUpdate = {
+            assetId: book.assetId,
+            bids: book.bids,
+            asks: book.asks,
+            timestamp: book.timestamp,
+          };
+          this.handleBookUpdate(bookUpdate);
+        },
+        onError: (error: Error) => this.emit('error', error),
+      }
+    );
 
     this.emit('started', market);
     this.log('Monitoring for arbitrage opportunities...');
@@ -406,7 +426,12 @@ export class ArbitrageService extends EventEmitter {
       this.rebalanceInterval = null;
     }
 
-    await this.wsManager.unsubscribeAll();
+    // Unsubscribe and disconnect
+    if (this.marketSubscription) {
+      this.marketSubscription.unsubscribe();
+      this.marketSubscription = null;
+    }
+    this.realtimeService.disconnect();
 
     this.log('Stopped');
     this.log(`Total opportunities: ${this.stats.opportunitiesDetected}`);
@@ -528,7 +553,7 @@ export class ArbitrageService extends EventEmitter {
    * Manually execute an arbitrage opportunity
    */
   async execute(opportunity: ArbitrageOpportunity): Promise<ArbitrageExecutionResult> {
-    if (!this.ctf || !this.tradingClient || !this.market) {
+    if (!this.ctf || !this.tradingService || !this.market) {
       return {
         success: false,
         type: opportunity.type,
@@ -654,7 +679,7 @@ export class ArbitrageService extends EventEmitter {
    * Execute a rebalance action
    */
   async rebalance(action?: RebalanceAction): Promise<RebalanceResult> {
-    if (!this.ctf || !this.tradingClient || !this.market) {
+    if (!this.ctf || !this.tradingService || !this.market) {
       return {
         success: false,
         action: action || { type: 'none', amount: 0, reason: 'No trading config', priority: 0 },
@@ -695,7 +720,7 @@ export class ArbitrageService extends EventEmitter {
           break;
         }
         case 'sell_yes': {
-          const result = await this.tradingClient.createMarketOrder({
+          const result = await this.tradingService.createMarketOrder({
             tokenId: this.market.yesTokenId,
             side: 'SELL',
             amount: rebalanceAction.amount,
@@ -708,7 +733,7 @@ export class ArbitrageService extends EventEmitter {
           break;
         }
         case 'sell_no': {
-          const result = await this.tradingClient.createMarketOrder({
+          const result = await this.tradingService.createMarketOrder({
             tokenId: this.market.noTokenId,
             side: 'SELL',
             amount: rebalanceAction.amount,
@@ -932,13 +957,13 @@ export class ArbitrageService extends EventEmitter {
       winningOutcome = resolution.winningOutcome;
       this.log(`   Status: ${marketStatus}${resolution.isResolved ? ` (Winner: ${winningOutcome})` : ''}`);
     } catch {
-      // If we can't determine resolution, try to get market status from CLOB
+      // If we can't determine resolution, try to get market status from MarketService
       try {
         const cache = createUnifiedCache();
-        const clobApi = new ClobApiClient(this.rateLimiter, cache);
-        const clobMarket = await clobApi.getMarket(market.conditionId);
+        const tempMarketService = new MarketService(undefined, undefined, this.rateLimiter, cache);
+        const clobMarket = await tempMarketService.getClobMarket(market.conditionId);
         marketStatus = clobMarket.closed ? 'resolved' : 'active';
-        this.log(`   Status: ${marketStatus} (from CLOB)`);
+        this.log(`   Status: ${marketStatus} (from MarketService)`);
       } catch {
         this.log(`   Status: unknown (assuming active)`);
         marketStatus = 'active';
@@ -1087,10 +1112,10 @@ export class ArbitrageService extends EventEmitter {
       }
 
       // Step 2: Sell unpaired tokens
-      if (this.tradingClient && unpairedYes >= this.config.minTradeSize) {
+      if (this.tradingService && unpairedYes >= this.config.minTradeSize) {
         try {
           const sellAmount = Math.floor(unpairedYes * 1e6) / 1e6;
-          const result = await this.tradingClient.createMarketOrder({
+          const result = await this.tradingService.createMarketOrder({
             tokenId: market.yesTokenId,
             side: 'SELL',
             amount: sellAmount,
@@ -1122,10 +1147,10 @@ export class ArbitrageService extends EventEmitter {
         }
       }
 
-      if (this.tradingClient && unpairedNo >= this.config.minTradeSize) {
+      if (this.tradingService && unpairedNo >= this.config.minTradeSize) {
         try {
           const sellAmount = Math.floor(unpairedNo * 1e6) / 1e6;
-          const result = await this.tradingClient.createMarketOrder({
+          const result = await this.tradingService.createMarketOrder({
             tokenId: market.noTokenId,
             side: 'SELL',
             amount: sellAmount,
@@ -1270,7 +1295,7 @@ export class ArbitrageService extends EventEmitter {
    * This is critical when one side of a parallel order fails
    */
   private async fixImbalanceIfNeeded(): Promise<void> {
-    if (!this.config.autoFixImbalance || !this.ctf || !this.tradingClient || !this.market) return;
+    if (!this.config.autoFixImbalance || !this.ctf || !this.tradingService || !this.market) return;
 
     await this.updateBalance();
     const imbalance = this.balance.yesTokens - this.balance.noTokens;
@@ -1286,7 +1311,7 @@ export class ArbitrageService extends EventEmitter {
     try {
       if (imbalance > 0) {
         // Sell excess YES
-        const result = await this.tradingClient.createMarketOrder({
+        const result = await this.tradingService.createMarketOrder({
           tokenId: this.market.yesTokenId,
           side: 'SELL',
           amount: sellAmount,
@@ -1297,7 +1322,7 @@ export class ArbitrageService extends EventEmitter {
         }
       } else {
         // Sell excess NO
-        const result = await this.tradingClient.createMarketOrder({
+        const result = await this.tradingService.createMarketOrder({
           tokenId: this.market.noTokenId,
           side: 'SELL',
           amount: sellAmount,
@@ -1365,13 +1390,13 @@ export class ArbitrageService extends EventEmitter {
       // Buy both tokens in parallel
       this.log(`  1. Buying tokens in parallel...`);
       const [buyYesResult, buyNoResult] = await Promise.all([
-        this.tradingClient!.createMarketOrder({
+        this.tradingService!.createMarketOrder({
           tokenId: this.market!.yesTokenId,
           side: 'BUY',
           amount: size * buyYes,
           orderType: 'FOK',
         }),
-        this.tradingClient!.createMarketOrder({
+        this.tradingService!.createMarketOrder({
           tokenId: this.market!.noTokenId,
           side: 'BUY',
           amount: size * buyNo,
@@ -1494,13 +1519,13 @@ export class ArbitrageService extends EventEmitter {
       // Sell both tokens in parallel
       this.log(`  1. Selling pre-held tokens in parallel...`);
       const [sellYesResult, sellNoResult] = await Promise.all([
-        this.tradingClient!.createMarketOrder({
+        this.tradingService!.createMarketOrder({
           tokenId: this.market!.yesTokenId,
           side: 'SELL',
           amount: size,
           orderType: 'FOK',
         }),
-        this.tradingClient!.createMarketOrder({
+        this.tradingService!.createMarketOrder({
           tokenId: this.market!.noTokenId,
           side: 'SELL',
           amount: size,
@@ -1599,7 +1624,7 @@ export class ArbitrageService extends EventEmitter {
     // Create temporary API clients for scanning
     const cache = createUnifiedCache();
     const gammaApi = new GammaApiClient(this.rateLimiter, cache);
-    const clobApi = new ClobApiClient(this.rateLimiter, cache);
+    const tempMarketService = new MarketService(gammaApi, undefined, this.rateLimiter, cache);
 
     // Fetch active markets from Gamma API
     const markets = await gammaApi.getMarkets({
@@ -1629,22 +1654,22 @@ export class ArbitrageService extends EventEmitter {
         // Skip non-binary markets
         if (!gammaMarket.conditionId || gammaMarket.outcomes?.length !== 2) continue;
 
-        // Get CLOB market data for token IDs
+        // Get market data for token IDs
         let clobMarket;
         try {
-          clobMarket = await clobApi.getMarket(gammaMarket.conditionId);
+          clobMarket = await tempMarketService.getClobMarket(gammaMarket.conditionId);
         } catch {
-          continue; // Skip if CLOB data not available
+          continue; // Skip if market data not available
         }
 
-        const yesToken = clobMarket.tokens.find((t) => t.outcome === 'Yes');
-        const noToken = clobMarket.tokens.find((t) => t.outcome === 'No');
+        const yesToken = clobMarket.tokens.find((t: { outcome: string }) => t.outcome === 'Yes');
+        const noToken = clobMarket.tokens.find((t: { outcome: string }) => t.outcome === 'No');
         if (!yesToken || !noToken) continue;
 
         // Get orderbook data
         let orderbook;
         try {
-          orderbook = await clobApi.getProcessedOrderbook(gammaMarket.conditionId);
+          orderbook = await tempMarketService.getProcessedOrderbook(gammaMarket.conditionId);
         } catch {
           continue; // Skip if orderbook not available
         }

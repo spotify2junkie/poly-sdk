@@ -1,7 +1,8 @@
 /**
  * Example 08: Trading Orders
  *
- * Demonstrates all trading functionality:
+ * Demonstrates trading functionality using TradingService and MarketService:
+ * - Market data fetching via MarketService (getMarket, getProcessedOrderbook, getPricesHistory)
  * - Limit orders (GTC, GTD)
  * - Market orders (FOK, FAK)
  * - Order management
@@ -13,7 +14,7 @@
  */
 
 import {
-  TradingClient,
+  TradingService,
   RateLimiter,
   PolymarketSDK,
   roundPrice,
@@ -21,6 +22,7 @@ import {
   calculateBuyAmount,
   checkArbitrage,
   formatUSDC,
+  createUnifiedCache,
   type TickSize,
 } from '../src/index.js';
 
@@ -28,12 +30,13 @@ import {
 const PRIVATE_KEY = process.env.POLYMARKET_PRIVATE_KEY || '0xYOUR_PRIVATE_KEY_HERE';
 
 async function main() {
-  console.log('=== Polymarket Trading Examples ===\n');
+  console.log('=== Polymarket Trading Examples (TradingService) ===\n');
 
-  // Initialize SDK and TradingClient
+  // Initialize SDK and TradingService
   const sdk = new PolymarketSDK();
   const rateLimiter = new RateLimiter();
-  const tradingClient = new TradingClient(rateLimiter, {
+  const cache = createUnifiedCache();
+  const tradingService = new TradingService(rateLimiter, cache, {
     privateKey: PRIVATE_KEY,
   });
 
@@ -51,14 +54,22 @@ async function main() {
     return;
   }
 
-  const market = markets[0];
-  console.log(`   Market: ${market.question?.slice(0, 60)}...`);
-  console.log(`   Condition ID: ${market.conditionId}`);
+  const gammaMarket = markets[0];
+  console.log(`   Market: ${gammaMarket.question?.slice(0, 60)}...`);
+  console.log(`   Condition ID: ${gammaMarket.conditionId}`);
 
-  // Get market details from CLOB
-  const clobMarket = await sdk.clobApi.getMarket(market.conditionId);
-  const yesToken = clobMarket.tokens.find((t) => t.outcome === 'Yes');
-  const noToken = clobMarket.tokens.find((t) => t.outcome === 'No');
+  // Get market details using TradingService
+  try {
+    await tradingService.initialize();
+  } catch {
+    console.log('   TradingService initialization skipped (no valid private key)');
+    console.log('   Using SDK for market data...\n');
+  }
+
+  // Get market data from CLOB via MarketService (no private key required)
+  const market = await sdk.markets.getClobMarket(gammaMarket.conditionId);
+  const yesToken = market.tokens.find((t) => t.outcome === 'Yes');
+  const noToken = market.tokens.find((t) => t.outcome === 'No');
 
   if (!yesToken || !noToken) {
     console.log('   Could not find tokens');
@@ -103,8 +114,8 @@ async function main() {
   // ===== 3. Arbitrage Detection =====
   console.log('\n3. Arbitrage Detection\n');
 
-  // Get current orderbook
-  const orderbook = await sdk.clobApi.getProcessedOrderbook(market.conditionId);
+  // Get current orderbook via MarketService (no private key required)
+  const orderbook = await sdk.markets.getProcessedOrderbook(gammaMarket.conditionId);
 
   console.log(`   YES: Bid $${orderbook.yes.bid} / Ask $${orderbook.yes.ask}`);
   console.log(`   NO:  Bid $${orderbook.no.bid} / Ask $${orderbook.no.ask}`);
@@ -126,31 +137,47 @@ async function main() {
     console.log(`   Short revenue: $${(orderbook.yes.bid + orderbook.no.bid).toFixed(4)}`);
   }
 
-  // ===== 4. Initialize Trading Client =====
-  console.log('\n4. Initializing Trading Client...\n');
+  // ===== 3.5 Price History Demo =====
+  console.log('\n3.5. Price History (MarketService)\n');
 
   try {
-    await tradingClient.initialize();
-    console.log(`   Wallet: ${tradingClient.getAddress()}`);
-    console.log(`   Initialized: ${tradingClient.isInitialized()}`);
-
-    const creds = tradingClient.getCredentials();
-    if (creds) {
-      console.log(`   API Key: ${creds.key.slice(0, 20)}...`);
+    const priceHistory = await sdk.markets.getPricesHistory({
+      tokenId: yesToken.tokenId,
+      interval: '1d',
+    });
+    console.log(`   Got ${priceHistory.length} price points for YES token`);
+    if (priceHistory.length > 0) {
+      const latest = priceHistory[priceHistory.length - 1];
+      console.log(`   Latest: ${new Date(latest.timestamp * 1000).toLocaleDateString()} @ $${latest.price.toFixed(4)}`);
     }
-  } catch (error) {
+  } catch (e) {
+    console.log(`   Price history unavailable: ${e}`);
+  }
+
+  // ===== 4. Trading Service Status =====
+  console.log('\n4. TradingService Status...\n');
+
+  if (!tradingService.isInitialized()) {
     console.log(`   Initialization skipped (no valid private key)`);
     console.log(`   Set POLYMARKET_PRIVATE_KEY to test trading`);
     return;
   }
 
+  console.log(`   Wallet: ${tradingService.getAddress()}`);
+  console.log(`   Initialized: ${tradingService.isInitialized()}`);
+
+  const creds = tradingService.getCredentials();
+  if (creds) {
+    console.log(`   API Key: ${creds.key.slice(0, 20)}...`);
+  }
+
   // ===== 5. Get Existing Orders and Trades =====
   console.log('\n5. Getting existing orders and trades...\n');
 
-  const openOrders = await tradingClient.getOpenOrders();
+  const openOrders = await tradingService.getOpenOrders();
   console.log(`   Open orders: ${openOrders.length}`);
 
-  const trades = await tradingClient.getTrades();
+  const trades = await tradingService.getTrades();
   console.log(`   Total trades: ${trades.length}`);
 
   if (trades.length > 0) {
@@ -168,7 +195,7 @@ async function main() {
   console.log('   - Stays on book until filled or cancelled');
   console.log('   - Best for passive orders at your target price');
   console.log(`
-   tradingClient.createOrder({
+   tradingService.createLimitOrder({
      tokenId: '${yesToken.tokenId.slice(0, 20)}...',
      side: 'BUY',
      price: 0.45,
@@ -181,7 +208,7 @@ async function main() {
   console.log('   - Auto-expires at specified timestamp');
   console.log('   - Good for time-sensitive strategies');
   console.log(`
-   tradingClient.createOrder({
+   tradingService.createLimitOrder({
      tokenId: '${yesToken.tokenId.slice(0, 20)}...',
      side: 'BUY',
      price: 0.45,
@@ -196,7 +223,7 @@ async function main() {
   console.log('   - Must fill entirely or not at all');
   console.log('   - Best for guaranteed execution');
   console.log(`
-   tradingClient.createMarketOrder({
+   tradingService.createMarketOrder({
      tokenId: '${yesToken.tokenId.slice(0, 20)}...',
      side: 'BUY',
      amount: 10, // $10 USDC for BUY
@@ -208,7 +235,7 @@ async function main() {
   console.log('   - Fill what you can, cancel the rest');
   console.log('   - Good for partial fills');
   console.log(`
-   tradingClient.createMarketOrder({
+   tradingService.createMarketOrder({
      tokenId: '${yesToken.tokenId.slice(0, 20)}...',
      side: 'SELL',
      amount: 10, // 10 shares for SELL
@@ -221,7 +248,7 @@ async function main() {
 
   try {
     // Get current reward programs
-    const rewards = await tradingClient.getCurrentRewards();
+    const rewards = await tradingService.getCurrentRewards();
     console.log(`   Active reward programs: ${rewards.length}`);
 
     if (rewards.length > 0) {
@@ -241,7 +268,7 @@ async function main() {
     // Check if orders are scoring (need actual order IDs)
     if (openOrders.length > 0) {
       const orderId = openOrders[0].id;
-      const isScoring = await tradingClient.isOrderScoring(orderId);
+      const isScoring = await tradingService.isOrderScoring(orderId);
       console.log(`\n   Order ${orderId.slice(0, 20)}... scoring: ${isScoring}`);
     }
 
@@ -250,9 +277,10 @@ async function main() {
     yesterday.setDate(yesterday.getDate() - 1);
     const dateStr = yesterday.toISOString().split('T')[0];
 
-    const earnings = await tradingClient.getTotalEarningsForDay(dateStr);
+    const earnings = await tradingService.getEarningsForDay(dateStr);
+    const totalEarnings = earnings.reduce((sum, e) => sum + e.earnings, 0);
     console.log(`\n   Earnings for ${dateStr}:`);
-    console.log(`   Total: ${formatUSDC(earnings.totalEarnings)}`);
+    console.log(`   Total: ${formatUSDC(totalEarnings)}`);
   } catch (error) {
     console.log(`   Rewards data not available (requires valid trading history)`);
   }
@@ -261,7 +289,7 @@ async function main() {
   console.log('\n8. Balance Check\n');
 
   try {
-    const balance = await tradingClient.getBalanceAllowance('COLLATERAL');
+    const balance = await tradingService.getBalanceAllowance('COLLATERAL');
     console.log(`   USDC Balance: ${balance.balance}`);
     console.log(`   USDC Allowance: ${balance.allowance}`);
   } catch (error) {

@@ -37,7 +37,6 @@
 import {
   CTFClient,
   PolymarketSDK,
-  TradingClient,
   RateLimiter,
   CTF_CONTRACT,
   USDC_CONTRACT,
@@ -110,7 +109,7 @@ async function main() {
 
   for (const market of markets) {
     try {
-      const orderbook = await sdk.clobApi.getProcessedOrderbook(market.conditionId);
+      const orderbook = await sdk.markets.getProcessedOrderbook(market.conditionId);
       const askSum = orderbook.summary.askSum;
 
       console.log(`   ${market.question?.slice(0, 40)}...`);

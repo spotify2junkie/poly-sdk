@@ -11,6 +11,7 @@ export enum ApiType {
   DATA_API = 'data-api',
   GAMMA_API = 'gamma-api',
   CLOB_API = 'clob-api',
+  SUBGRAPH = 'subgraph',
 }
 
 const API_LIMITS: Record<ApiType, Bottleneck.ConstructorOptions> = {
@@ -27,6 +28,10 @@ const API_LIMITS: Record<ApiType, Bottleneck.ConstructorOptions> = {
     reservoir: 10,
     reservoirRefreshAmount: 10,
     reservoirRefreshInterval: 1000,
+  },
+  [ApiType.SUBGRAPH]: {
+    minTime: 50, // 50ms minimum interval
+    maxConcurrent: 10,
   },
 };
 

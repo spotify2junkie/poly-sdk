@@ -2,7 +2,7 @@
  * 检查 Polymarket 真实订单
  */
 
-import { TradingClient, RateLimiter } from '../src/index.js';
+import { TradingService, RateLimiter, createUnifiedCache } from '../../src/index.js';
 
 async function main() {
   const privateKey = process.env.POLY_PRIVKEY || process.env.PRIVATE_KEY;
@@ -12,7 +12,8 @@ async function main() {
   }
 
   const rateLimiter = new RateLimiter();
-  const client = new TradingClient(rateLimiter, { privateKey });
+  const cache = createUnifiedCache();
+  const client = new TradingService(rateLimiter, cache, { privateKey });
 
   console.log('⏳ 初始化...');
   await client.initialize();

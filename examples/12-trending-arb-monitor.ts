@@ -152,7 +152,7 @@ async function fetchTrendingMarkets(sdk: PolymarketSDK): Promise<MonitoredMarket
 
 async function scanMarket(sdk: PolymarketSDK, market: MonitoredMarket): Promise<ScanResult | null> {
   try {
-    const orderbook = await sdk.clobApi.getProcessedOrderbook(market.conditionId);
+    const orderbook = await sdk.markets.getProcessedOrderbook(market.conditionId);
 
     market.scanCount++;
     market.lastUpdate = Date.now();

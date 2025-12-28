@@ -29,6 +29,9 @@ export enum ErrorCode {
 
   // Internal errors
   INTERNAL_ERROR = 'INTERNAL_ERROR',
+
+  // Configuration errors
+  INVALID_CONFIG = 'INVALID_CONFIG',
 }
 
 export class PolymarketError extends Error {

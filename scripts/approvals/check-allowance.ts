@@ -9,7 +9,7 @@
  *   POLY_PRIVKEY=0x... npx tsx scripts/check-allowance.ts approve
  */
 
-import { TradingClient, RateLimiter } from '../src/index.js';
+import { TradingService, RateLimiter, createUnifiedCache } from '../../src/index.js';
 
 const PRIVATE_KEY = process.env.POLY_PRIVKEY || '';
 
@@ -27,18 +27,19 @@ async function main() {
   console.log('');
 
   const rateLimiter = new RateLimiter();
-  const tradingClient = new TradingClient(rateLimiter, {
+  const cache = createUnifiedCache();
+  const tradingService = new TradingService(rateLimiter, cache, {
     privateKey: PRIVATE_KEY,
     chainId: 137,
   });
 
-  await tradingClient.initialize();
-  console.log(`Wallet: ${tradingClient.getAddress()}`);
+  await tradingService.initialize();
+  console.log(`Wallet: ${tradingService.getAddress()}`);
   console.log('');
 
   // Check current balance and allowance
   console.log('─── Current Status ───');
-  const { balance, allowance } = await tradingClient.getBalanceAllowance('COLLATERAL');
+  const { balance, allowance } = await tradingService.getBalanceAllowance('COLLATERAL');
 
   const balanceUsdc = parseFloat(balance) / 1e6;
   const allowanceUsdc = allowance ? parseFloat(allowance) / 1e6 : Infinity;
@@ -62,7 +63,7 @@ async function main() {
 
     try {
       // Get the underlying CLOB client to access approve methods
-      const client = (tradingClient as unknown as { clobClient: { approveCollateral: () => Promise<unknown> } }).clobClient;
+      const client = (tradingService as unknown as { clobClient: { approveCollateral: () => Promise<unknown> } }).clobClient;
 
       if (client && typeof client.approveCollateral === 'function') {
         console.log('Sending approval transaction...');
@@ -111,7 +112,7 @@ async function main() {
       console.log('✅ Approval complete!');
 
       // Re-check allowance
-      const { allowance: newAllowance } = await tradingClient.getBalanceAllowance('COLLATERAL');
+      const { allowance: newAllowance } = await tradingService.getBalanceAllowance('COLLATERAL');
       console.log(`New Allowance: ${newAllowance === 'unlimited' ? 'Unlimited' : newAllowance}`);
 
     } catch (error) {

@@ -1,29 +1,363 @@
 /**
  * Market Service
  *
- * Provides enhanced market analysis features:
+ * Provides market data and analysis:
+ * - Market info and discovery
+ * - Orderbook data and analysis
  * - K-Line aggregation from trade data
- * - Dual token K-Lines (YES + NO)
  * - Spread analysis
- * - Market signal detection
+ * - Arbitrage detection
  */
 
+import {
+  ClobClient,
+  Side as ClobSide,
+  Chain,
+  PriceHistoryInterval,
+  type OrderBookSummary,
+} from '@polymarket/clob-client';
+import { Wallet } from 'ethers';
 import { DataApiClient, Trade } from '../clients/data-api.js';
 import { GammaApiClient, GammaMarket } from '../clients/gamma-api.js';
-import { ClobApiClient, ClobMarket } from '../clients/clob-api.js';
 import type { UnifiedCache } from '../core/unified-cache.js';
+import { CACHE_TTL } from '../core/unified-cache.js';
+import { RateLimiter, ApiType } from '../core/rate-limiter.js';
 import { PolymarketError, ErrorCode } from '../core/errors.js';
-import type { UnifiedMarket, ProcessedOrderbook, ArbitrageOpportunity, KLineInterval, KLineCandle, DualKLineData, SpreadDataPoint, RealtimeSpreadAnalysis } from '../core/types.js';
+import type {
+  UnifiedMarket,
+  ProcessedOrderbook,
+  EffectivePrices,
+  ArbitrageOpportunity,
+  KLineInterval,
+  KLineCandle,
+  DualKLineData,
+  SpreadDataPoint,
+  RealtimeSpreadAnalysis,
+} from '../core/types.js';
+
+// CLOB Host
+const CLOB_HOST = 'https://clob.polymarket.com';
+
+// Chain IDs
+export const POLYGON_MAINNET = 137;
+
+// ============================================================================
+// Types
+// ============================================================================
+
+export type Side = 'BUY' | 'SELL';
+
+export type PriceHistoryIntervalString = '1h' | '6h' | '1d' | '1w' | 'max';
+
+export interface PriceHistoryParams {
+  tokenId: string;
+  interval?: PriceHistoryIntervalString;
+  startTs?: number;
+  endTs?: number;
+  fidelity?: number;
+}
+
+export interface PricePoint {
+  timestamp: number;
+  price: number;
+}
+
+export interface Orderbook {
+  bids: Array<{ price: number; size: number }>;
+  asks: Array<{ price: number; size: number }>;
+  timestamp: number;
+  market?: string;
+  assetId?: string;
+  hash?: string;
+}
+
+export interface MarketServiceConfig {
+  /** Private key for CLOB client auth (optional, for authenticated endpoints) */
+  privateKey?: string;
+  /** Chain ID (default: Polygon mainnet 137) */
+  chainId?: number;
+}
+
+// Internal type for CLOB market data
+interface ClobMarket {
+  condition_id: string;
+  question_id?: string;
+  market_slug: string;
+  question: string;
+  description?: string;
+  tokens: Array<{
+    token_id: string;
+    outcome: string;
+    price: number;
+    winner?: boolean;
+  }>;
+  active: boolean;
+  closed: boolean;
+  accepting_orders: boolean;
+  end_date_iso?: string | null;
+  neg_risk?: boolean;
+  minimum_order_size?: number;
+  minimum_tick_size?: number;
+}
+
+export interface Market {
+  conditionId: string;
+  questionId?: string;
+  marketSlug: string;
+  question: string;
+  description?: string;
+  tokens: MarketToken[];
+  active: boolean;
+  closed: boolean;
+  acceptingOrders: boolean;
+  endDateIso?: string | null;
+  negRisk?: boolean;
+  minimumOrderSize?: number;
+  minimumTickSize?: number;
+}
+
+export interface MarketToken {
+  tokenId: string;
+  outcome: string;
+  price: number;
+  winner?: boolean;
+}
+
+// ============================================================================
+// MarketService Implementation
+// ============================================================================
 
 export class MarketService {
+  private clobClient: ClobClient | null = null;
+  private initialized = false;
+
   constructor(
-    private gammaApi: GammaApiClient,
-    private clobApi: ClobApiClient,
-    private dataApi: DataApiClient,
-    private cache: UnifiedCache
+    private gammaApi: GammaApiClient | undefined,
+    private dataApi: DataApiClient | undefined,
+    private rateLimiter: RateLimiter,
+    private cache: UnifiedCache,
+    private config?: MarketServiceConfig
   ) {}
 
-  // ===== Unified Market Access =====
+  // ============================================================================
+  // Initialization
+  // ============================================================================
+
+  private async ensureInitialized(): Promise<ClobClient> {
+    if (!this.initialized || !this.clobClient) {
+      const chainId = (this.config?.chainId || POLYGON_MAINNET) as Chain;
+
+      if (this.config?.privateKey) {
+        // Authenticated client
+        const wallet = new Wallet(this.config.privateKey);
+        this.clobClient = new ClobClient(CLOB_HOST, chainId, wallet);
+      } else {
+        // Read-only client (no auth needed for market data)
+        this.clobClient = new ClobClient(CLOB_HOST, chainId);
+      }
+      this.initialized = true;
+    }
+    return this.clobClient!;
+  }
+
+  // ============================================================================
+  // CLOB Market Data Methods
+  // ============================================================================
+
+  /**
+   * Get market from CLOB by condition ID
+   */
+  async getClobMarket(conditionId: string): Promise<Market> {
+    const cacheKey = `clob:market:${conditionId}`;
+    return this.cache.getOrSet(cacheKey, CACHE_TTL.MARKET_INFO, async () => {
+      const client = await this.ensureInitialized();
+      return this.rateLimiter.execute(ApiType.CLOB_API, async () => {
+        const market = await client.getMarket(conditionId);
+        return this.normalizeClobMarket(market as ClobMarket);
+      });
+    });
+  }
+
+  /**
+   * Get multiple markets from CLOB
+   */
+  async getClobMarkets(nextCursor?: string): Promise<{ markets: Market[]; nextCursor: string }> {
+    const client = await this.ensureInitialized();
+    return this.rateLimiter.execute(ApiType.CLOB_API, async () => {
+      const result = await client.getMarkets(nextCursor);
+      return {
+        markets: (result.data as ClobMarket[]).map(m => this.normalizeClobMarket(m)),
+        nextCursor: result.next_cursor,
+      };
+    });
+  }
+
+  /**
+   * Get orderbook for a single token
+   */
+  async getTokenOrderbook(tokenId: string): Promise<Orderbook> {
+    const client = await this.ensureInitialized();
+    return this.rateLimiter.execute(ApiType.CLOB_API, async () => {
+      const book = await client.getOrderBook(tokenId) as OrderBookSummary;
+
+      const bids = (book.bids || [])
+        .map((l: { price: string; size: string }) => ({
+          price: parseFloat(l.price),
+          size: parseFloat(l.size),
+        }))
+        .sort((a, b) => b.price - a.price);
+
+      const asks = (book.asks || [])
+        .map((l: { price: string; size: string }) => ({
+          price: parseFloat(l.price),
+          size: parseFloat(l.size),
+        }))
+        .sort((a, b) => a.price - b.price);
+
+      return {
+        bids,
+        asks,
+        timestamp: parseInt(book.timestamp || '0', 10) || Date.now(),
+        market: book.market,
+        assetId: book.asset_id,
+        hash: book.hash,
+      };
+    });
+  }
+
+  /**
+   * Get orderbooks for multiple tokens
+   */
+  async getTokenOrderbooks(
+    params: Array<{ tokenId: string; side: Side }>
+  ): Promise<Map<string, Orderbook>> {
+    const client = await this.ensureInitialized();
+    return this.rateLimiter.execute(ApiType.CLOB_API, async () => {
+      const bookParams = params.map(p => ({
+        token_id: p.tokenId,
+        side: p.side === 'BUY' ? ClobSide.BUY : ClobSide.SELL,
+      }));
+      const books = await client.getOrderBooks(bookParams);
+      const result = new Map<string, Orderbook>();
+
+      for (const book of books) {
+        const bids = (book.bids || [])
+          .map((l: { price: string; size: string }) => ({
+            price: parseFloat(l.price),
+            size: parseFloat(l.size),
+          }))
+          .sort((a, b) => b.price - a.price);
+
+        const asks = (book.asks || [])
+          .map((l: { price: string; size: string }) => ({
+            price: parseFloat(l.price),
+            size: parseFloat(l.size),
+          }))
+          .sort((a, b) => a.price - b.price);
+
+        result.set(book.asset_id, {
+          bids,
+          asks,
+          timestamp: parseInt(book.timestamp || '0', 10) || Date.now(),
+          market: book.market,
+          assetId: book.asset_id,
+          hash: book.hash,
+        });
+      }
+
+      return result;
+    });
+  }
+
+  /**
+   * Get processed orderbook with arbitrage analysis for a market
+   */
+  async getProcessedOrderbook(conditionId: string): Promise<ProcessedOrderbook> {
+    const market = await this.getClobMarket(conditionId);
+    const yesToken = market.tokens.find(t => t.outcome === 'Yes');
+    const noToken = market.tokens.find(t => t.outcome === 'No');
+
+    if (!yesToken || !noToken) {
+      throw new PolymarketError(ErrorCode.INVALID_RESPONSE, 'Missing tokens in market');
+    }
+
+    const [yesBook, noBook] = await Promise.all([
+      this.getTokenOrderbook(yesToken.tokenId),
+      this.getTokenOrderbook(noToken.tokenId),
+    ]);
+
+    return this.processOrderbooks(yesBook, noBook, yesToken.tokenId, noToken.tokenId);
+  }
+
+  /**
+   * Get price history for a token
+   */
+  async getPricesHistory(params: PriceHistoryParams): Promise<PricePoint[]> {
+    const client = await this.ensureInitialized();
+    return this.rateLimiter.execute(ApiType.CLOB_API, async () => {
+      const intervalMap: Record<PriceHistoryIntervalString, PriceHistoryInterval> = {
+        '1h': PriceHistoryInterval.ONE_HOUR,
+        '6h': PriceHistoryInterval.SIX_HOURS,
+        '1d': PriceHistoryInterval.ONE_DAY,
+        '1w': PriceHistoryInterval.ONE_WEEK,
+        'max': PriceHistoryInterval.MAX,
+      };
+
+      const history = await client.getPricesHistory({
+        market: params.tokenId,
+        interval: params.interval ? intervalMap[params.interval] : undefined,
+        startTs: params.startTs,
+        endTs: params.endTs,
+        fidelity: params.fidelity,
+      });
+
+      const historyArray = Array.isArray(history)
+        ? history
+        : (history as { history?: Array<{ t: number; p: number }> })?.history || [];
+
+      return historyArray.map((pt: { t: number; p: number }) => ({
+        timestamp: pt.t,
+        price: pt.p,
+      }));
+    });
+  }
+
+  /**
+   * Get midpoint price for a token
+   */
+  async getMidpoint(tokenId: string): Promise<number> {
+    const client = await this.ensureInitialized();
+    return this.rateLimiter.execute(ApiType.CLOB_API, async () => {
+      const midpoint = await client.getMidpoint(tokenId);
+      return Number(midpoint);
+    });
+  }
+
+  /**
+   * Get spread for a token
+   */
+  async getSpread(tokenId: string): Promise<number> {
+    const client = await this.ensureInitialized();
+    return this.rateLimiter.execute(ApiType.CLOB_API, async () => {
+      const spread = await client.getSpread(tokenId);
+      return Number(spread);
+    });
+  }
+
+  /**
+   * Get last trade price for a token
+   */
+  async getLastTradePrice(tokenId: string): Promise<number> {
+    const client = await this.ensureInitialized();
+    return this.rateLimiter.execute(ApiType.CLOB_API, async () => {
+      const price = await client.getLastTradePrice(tokenId);
+      return Number(price);
+    });
+  }
+
+  // ============================================================================
+  // Unified Market Access
+  // ============================================================================
 
   /**
    * Get market by slug or condition ID
@@ -39,13 +373,16 @@ export class MarketService {
   }
 
   private async getMarketBySlug(slug: string): Promise<UnifiedMarket> {
+    if (!this.gammaApi) {
+      throw new PolymarketError(ErrorCode.INVALID_CONFIG, 'GammaApiClient is required for slug-based lookups');
+    }
     const gammaMarket = await this.gammaApi.getMarketBySlug(slug);
     if (!gammaMarket) {
       throw new PolymarketError(ErrorCode.MARKET_NOT_FOUND, `Market not found: ${slug}`);
     }
 
     try {
-      const clobMarket = await this.clobApi.getMarket(gammaMarket.conditionId);
+      const clobMarket = await this.getClobMarket(gammaMarket.conditionId);
       return this.mergeMarkets(gammaMarket, clobMarket);
     } catch {
       return this.fromGammaMarket(gammaMarket);
@@ -54,21 +391,23 @@ export class MarketService {
 
   private async getMarketByConditionId(conditionId: string): Promise<UnifiedMarket> {
     // Try to get data from both sources for best accuracy
-    let clobMarket: ClobMarket | null = null;
+    let clobMarket: Market | null = null;
     let gammaMarket: GammaMarket | null = null;
 
     // Try CLOB first (authoritative for trading data)
     try {
-      clobMarket = await this.clobApi.getMarket(conditionId);
+      clobMarket = await this.getClobMarket(conditionId);
     } catch {
       // CLOB failed, continue to try Gamma
     }
 
-    // Always try Gamma for accurate slug and metadata
-    try {
-      gammaMarket = await this.gammaApi.getMarketByConditionId(conditionId);
-    } catch {
-      // Gamma failed
+    // Always try Gamma for accurate slug and metadata (if available)
+    if (this.gammaApi) {
+      try {
+        gammaMarket = await this.gammaApi.getMarketByConditionId(conditionId);
+      } catch {
+        // Gamma failed
+      }
     }
 
     // Merge if both available (preferred)
@@ -84,7 +423,7 @@ export class MarketService {
     // CLOB only - slug might be stale, add warning
     if (clobMarket) {
       const market = this.fromClobMarket(clobMarket);
-      // Check if CLOB slug looks stale (doesn't match question keywords)
+      // Check if slug looks stale (doesn't match question keywords)
       const questionWords = clobMarket.question.toLowerCase().split(/\s+/).slice(0, 3);
       const slugWords = clobMarket.marketSlug.toLowerCase().split('-');
       const hasMatchingWord = questionWords.some(qw =>
@@ -110,6 +449,9 @@ export class MarketService {
     interval: KLineInterval,
     options?: { limit?: number; tokenId?: string; outcomeIndex?: number }
   ): Promise<KLineCandle[]> {
+    if (!this.dataApi) {
+      throw new PolymarketError(ErrorCode.INVALID_CONFIG, 'DataApiClient is required for K-Line data');
+    }
     const trades = await this.dataApi.getTradesByMarket(conditionId, options?.limit || 1000);
 
     // Filter by token/outcome if specified
@@ -131,6 +473,9 @@ export class MarketService {
     interval: KLineInterval,
     options?: { limit?: number }
   ): Promise<DualKLineData> {
+    if (!this.dataApi) {
+      throw new PolymarketError(ErrorCode.INVALID_CONFIG, 'DataApiClient is required for K-Line data');
+    }
     const market = await this.getMarket(conditionId);
     const trades = await this.dataApi.getTradesByMarket(conditionId, options?.limit || 1000);
 
@@ -145,7 +490,7 @@ export class MarketService {
     let currentOrderbook: ProcessedOrderbook | undefined;
     let realtimeSpread: RealtimeSpreadAnalysis | undefined;
     try {
-      currentOrderbook = await this.clobApi.getProcessedOrderbook(conditionId);
+      currentOrderbook = await this.getProcessedOrderbook(conditionId);
       realtimeSpread = this.calculateRealtimeSpread(currentOrderbook);
     } catch {
       // Orderbook not available
@@ -309,17 +654,17 @@ export class MarketService {
    * Use this for quick arbitrage checks
    */
   async getRealtimeSpread(conditionId: string): Promise<RealtimeSpreadAnalysis> {
-    const orderbook = await this.clobApi.getProcessedOrderbook(conditionId);
+    const orderbook = await this.getProcessedOrderbook(conditionId);
     return this.calculateRealtimeSpread(orderbook);
   }
 
   // ===== Orderbook Analysis =====
 
   /**
-   * Get processed orderbook with analytics
+   * Get processed orderbook with analytics (alias for getProcessedOrderbook)
    */
   async getOrderbook(conditionId: string): Promise<ProcessedOrderbook> {
-    return this.clobApi.getProcessedOrderbook(conditionId);
+    return this.getProcessedOrderbook(conditionId);
   }
 
   /**
@@ -361,6 +706,9 @@ export class MarketService {
    * Get trending markets
    */
   async getTrendingMarkets(limit = 20): Promise<GammaMarket[]> {
+    if (!this.gammaApi) {
+      throw new PolymarketError(ErrorCode.INVALID_CONFIG, 'GammaApiClient is required for trending markets');
+    }
     return this.gammaApi.getTrendingMarkets(limit);
   }
 
@@ -374,6 +722,9 @@ export class MarketService {
     offset?: number;
     order?: string;
   }): Promise<GammaMarket[]> {
+    if (!this.gammaApi) {
+      throw new PolymarketError(ErrorCode.INVALID_CONFIG, 'GammaApiClient is required for market search');
+    }
     return this.gammaApi.getMarkets(params);
   }
 
@@ -395,6 +746,9 @@ export class MarketService {
       details: Record<string, unknown>;
     }> = [];
 
+    if (!this.dataApi) {
+      throw new PolymarketError(ErrorCode.INVALID_CONFIG, 'DataApiClient is required for signal detection');
+    }
     const market = await this.getMarket(conditionId);
     const orderbook = await this.getOrderbook(conditionId);
     const trades = await this.dataApi.getTradesByMarket(conditionId, 100);
@@ -449,7 +803,102 @@ export class MarketService {
 
   // ===== Helper Methods =====
 
-  private mergeMarkets(gamma: GammaMarket, clob: ClobMarket): UnifiedMarket {
+  private normalizeClobMarket(m: ClobMarket): Market {
+    return {
+      conditionId: m.condition_id,
+      questionId: m.question_id,
+      marketSlug: m.market_slug,
+      question: m.question,
+      description: m.description,
+      tokens: m.tokens.map(t => ({
+        tokenId: t.token_id,
+        outcome: t.outcome,
+        price: t.price,
+        winner: t.winner,
+      })),
+      active: m.active,
+      closed: m.closed,
+      acceptingOrders: m.accepting_orders,
+      endDateIso: m.end_date_iso,
+      negRisk: m.neg_risk,
+      minimumOrderSize: m.minimum_order_size,
+      minimumTickSize: m.minimum_tick_size,
+    };
+  }
+
+  private processOrderbooks(
+    yesBook: Orderbook,
+    noBook: Orderbook,
+    yesTokenId?: string,
+    noTokenId?: string
+  ): ProcessedOrderbook {
+    const yesBestBid = yesBook.bids[0]?.price || 0;
+    const yesBestAsk = yesBook.asks[0]?.price || 1;
+    const noBestBid = noBook.bids[0]?.price || 0;
+    const noBestAsk = noBook.asks[0]?.price || 1;
+
+    const yesBidDepth = yesBook.bids.reduce((sum, l) => sum + l.price * l.size, 0);
+    const yesAskDepth = yesBook.asks.reduce((sum, l) => sum + l.price * l.size, 0);
+    const noBidDepth = noBook.bids.reduce((sum, l) => sum + l.price * l.size, 0);
+    const noAskDepth = noBook.asks.reduce((sum, l) => sum + l.price * l.size, 0);
+
+    const askSum = yesBestAsk + noBestAsk;
+    const bidSum = yesBestBid + noBestBid;
+
+    // Effective prices (accounting for mirroring)
+    const effectivePrices: EffectivePrices = {
+      effectiveBuyYes: Math.min(yesBestAsk, 1 - noBestBid),
+      effectiveBuyNo: Math.min(noBestAsk, 1 - yesBestBid),
+      effectiveSellYes: Math.max(yesBestBid, 1 - noBestAsk),
+      effectiveSellNo: Math.max(noBestBid, 1 - yesBestAsk),
+    };
+
+    const effectiveLongCost = effectivePrices.effectiveBuyYes + effectivePrices.effectiveBuyNo;
+    const effectiveShortRevenue = effectivePrices.effectiveSellYes + effectivePrices.effectiveSellNo;
+
+    const longArbProfit = 1 - effectiveLongCost;
+    const shortArbProfit = effectiveShortRevenue - 1;
+
+    const yesSpread = yesBestAsk - yesBestBid;
+
+    return {
+      yes: {
+        bid: yesBestBid,
+        ask: yesBestAsk,
+        bidSize: yesBook.bids[0]?.size || 0,
+        askSize: yesBook.asks[0]?.size || 0,
+        bidDepth: yesBidDepth,
+        askDepth: yesAskDepth,
+        spread: yesSpread,
+        tokenId: yesTokenId,
+      },
+      no: {
+        bid: noBestBid,
+        ask: noBestAsk,
+        bidSize: noBook.bids[0]?.size || 0,
+        askSize: noBook.asks[0]?.size || 0,
+        bidDepth: noBidDepth,
+        askDepth: noAskDepth,
+        spread: noBestAsk - noBestBid,
+        tokenId: noTokenId,
+      },
+      summary: {
+        askSum,
+        bidSum,
+        effectivePrices,
+        effectiveLongCost,
+        effectiveShortRevenue,
+        longArbProfit,
+        shortArbProfit,
+        totalBidDepth: yesBidDepth + noBidDepth,
+        totalAskDepth: yesAskDepth + noAskDepth,
+        imbalanceRatio: (yesBidDepth + noBidDepth) / (yesAskDepth + noAskDepth + 0.001),
+        yesSpread,
+      },
+    };
+  }
+
+  private mergeMarkets(gamma: GammaMarket, clob: Market): UnifiedMarket {
     const yesToken = clob.tokens.find((t) => t.outcome === 'Yes');
     const noToken = clob.tokens.find((t) => t.outcome === 'No');
 
@@ -500,7 +949,7 @@ export class MarketService {
     };
   }
 
-  private fromClobMarket(clob: ClobMarket): UnifiedMarket {
+  private fromClobMarket(clob: Market): UnifiedMarket {
     const yesToken = clob.tokens.find((t) => t.outcome === 'Yes');
     const noToken = clob.tokens.find((t) => t.outcome === 'No');
 

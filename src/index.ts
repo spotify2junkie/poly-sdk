@@ -26,6 +26,21 @@ export type {
   Trade,
   LeaderboardEntry,
   LeaderboardPage,
+  // Leaderboard parameters (supports time period filtering)
+  LeaderboardParams,
+  LeaderboardTimePeriod,
+  LeaderboardOrderBy,
+  LeaderboardCategory,
+  // P0/P1/P2 Gap Analysis types
+  ActivityParams,
+  PositionsParams,
+  TradesParams,
+  HoldersParams,
+  AccountValue,
+  MarketHolder,
+  // Closed positions
+  ClosedPosition,
+  ClosedPositionsParams,
 } from './clients/data-api.js';
 
 export { GammaApiClient } from './clients/gamma-api.js';
@@ -35,13 +50,31 @@ export type {
   MarketSearchParams,
 } from './clients/gamma-api.js';
 
-export { ClobApiClient } from './clients/clob-api.js';
+// ClobApiClient has been removed - use TradingService instead
+// TradingService provides getMarket(), getProcessedOrderbook(), etc.
+
+// Subgraph Client (on-chain data via Goldsky)
+export { SubgraphClient, SUBGRAPH_ENDPOINTS } from './clients/subgraph.js';
 export type {
-  ClobMarket,
-  ClobToken,
-  Orderbook,
-  OrderbookLevel,
-} from './clients/clob-api.js';
+  SubgraphName,
+  SubgraphQueryParams,
+  // Positions Subgraph
+  UserBalance,
+  NetUserBalance,
+  // PnL Subgraph
+  UserPosition,
+  Condition,
+  // Activity Subgraph
+  Split,
+  Merge,
+  Redemption,
+  // OI Subgraph
+  MarketOpenInterest,
+  GlobalOpenInterest,
+  // Orderbook Subgraph
+  OrderFilledEvent,
+  MarketData,
+} from './clients/subgraph.js';
 
 // Services
 export { WalletService } from './services/wallet-service.js';
@@ -49,16 +82,47 @@ export type {
   WalletProfile,
   WalletActivitySummary,
   SellActivityResult,
+  // Time-based leaderboard types
+  TimePeriod,
+  LeaderboardSortBy,
+  PeriodLeaderboardEntry,
+  WalletPeriodStats,
+  // PnL calculation types
+  ParsedTrade,
+  TokenPosition,
+  UserPeriodStats,
 } from './services/wallet-service.js';
 
 export { MarketService, getIntervalMs as getIntervalMsService } from './services/market-service.js';
 
-// Real-time
-export { WebSocketManager } from './clients/websocket-manager.js';
-export type { WebSocketManagerConfig, WebSocketManagerEvents } from './clients/websocket-manager.js';
+// Real-time (V2 - using official @polymarket/real-time-data-client)
+export { RealtimeServiceV2 } from './services/realtime-service-v2.js';
+export type {
+  RealtimeServiceConfig,
+  OrderbookSnapshot,
+  LastTradeInfo,
+  PriceChange,
+  TickSizeChange,
+  MarketEvent,
+  UserOrder,
+  UserTrade,
+  ActivityTrade,
+  CryptoPrice,
+  EquityPrice,
+  Comment,
+  Reaction,
+  RFQRequest,
+  RFQQuote,
+  Subscription,
+  MarketSubscription,
+  MarketDataHandlers,
+  UserDataHandlers,
+  ActivityHandlers,
+  CryptoPriceHandlers,
+  EquityPriceHandlers,
+} from './services/realtime-service-v2.js';
 
-export { RealtimeService } from './services/realtime-service.js';
-export type { Subscription, MarketSubscriptionHandlers } from './services/realtime-service.js';
+// RealtimeService (legacy) has been removed - use RealtimeServiceV2 instead
 
 // ArbitrageService (Real-time arbitrage detection, execution, rebalancing, and settlement)
 export { ArbitrageService } from './services/arbitrage-service.js';
@@ -83,23 +147,49 @@ export type {
   ScanResult,
 } from './services/arbitrage-service.js';
 
-// Trading
-export { TradingClient, POLYGON_MAINNET, POLYGON_AMOY } from './clients/trading-client.js';
+// SmartMoneyService - Smart Money detection and Copy Trading
+export { SmartMoneyService } from './services/smart-money-service.js';
 export type {
+  SmartMoneyWallet,
+  SmartMoneyTrade,
+  PositionSnapshot,
+  TraderPosition,
+  TradingSignal,
+  CopyTradeOptions,
+  SmartMoneyServiceConfig,
+} from './services/smart-money-service.js';
+
+// TradingService - Unified trading and market data
+export { TradingService, POLYGON_MAINNET, POLYGON_AMOY } from './services/trading-service.js';
+export type {
+  TradingServiceConfig,
+  // Order types
   Side,
   OrderType,
   ApiCredentials,
-  OrderParams,
+  LimitOrderParams,
   MarketOrderParams,
+  // Results
   Order,
   OrderResult,
   TradeInfo,
-  TradingClientConfig,
-  // Rewards types
+  // Rewards
   UserEarning,
   MarketReward,
-  OrderScoring,
-} from './clients/trading-client.js';
+} from './services/trading-service.js';
+
+// Market types from MarketService
+export type {
+  Market,
+  MarketToken,
+  Orderbook,
+  PricePoint,
+  PriceHistoryParams,
+  PriceHistoryIntervalString,
+} from './services/market-service.js';
+
+// TradingClient (legacy) has been removed - use TradingService instead
+// TradingService provides all trading functionality with proper type exports
 
 // CTF (Conditional Token Framework)
 // NOTE: USDC_CONTRACT is USDC.e (bridged), required for Polymarket CTF
@@ -205,9 +295,10 @@ export type { TickSize } from './utils/price-utils.js';
 import { RateLimiter } from './core/rate-limiter.js';
 import { DataApiClient } from './clients/data-api.js';
 import { GammaApiClient } from './clients/gamma-api.js';
-import { ClobApiClient } from './clients/clob-api.js';
+import { SubgraphClient } from './clients/subgraph.js';
 import { WalletService } from './services/wallet-service.js';
 import { MarketService } from './services/market-service.js';
+import { TradingService } from './services/trading-service.js';
 import type { UnifiedMarket, ProcessedOrderbook, ArbitrageOpportunity, KLineInterval, KLineCandle, DualKLineData, PolySDKOptions } from './core/types.js';
 import { PolymarketError, ErrorCode } from './core/errors.js';
 import { createUnifiedCache, type UnifiedCache } from './core/unified-cache.js';
@@ -223,11 +314,15 @@ export class PolymarketSDK {
   // API Clients
   public readonly dataApi: DataApiClient;
   public readonly gammaApi: GammaApiClient;
-  public readonly clobApi: ClobApiClient;
+  public readonly tradingService: TradingService;
+  public readonly subgraph: SubgraphClient;
 
   // Services
   public readonly wallets: WalletService;
   public readonly markets: MarketService;
+
+  // Initialization state
+  private _initialized = false;
 
   constructor(config: PolymarketSDKConfig = {}) {
     // Initialize infrastructure
@@ -239,15 +334,36 @@ export class PolymarketSDK {
     // Initialize API clients
     this.dataApi = new DataApiClient(this.rateLimiter, this.cache);
     this.gammaApi = new GammaApiClient(this.rateLimiter, this.cache);
-    this.clobApi = new ClobApiClient(this.rateLimiter, this.cache, {
+
+    // TradingService requires a private key - use provided key or dummy key for read-only
+    const privateKey = config.privateKey || '0x' + '1'.repeat(64);
+    this.tradingService = new TradingService(this.rateLimiter, this.cache, {
+      privateKey,
       chainId: config.chainId,
-      signer: config.signer,
-      creds: config.creds,
+      credentials: config.creds,
     });
 
+    this.subgraph = new SubgraphClient(this.rateLimiter, this.cache);
+
     // Initialize services
-    this.wallets = new WalletService(this.dataApi, this.cache);
-    this.markets = new MarketService(this.gammaApi, this.clobApi, this.dataApi, this.cache);
+    this.wallets = new WalletService(this.dataApi, this.subgraph, this.cache);
+    this.markets = new MarketService(this.gammaApi, this.dataApi, this.rateLimiter, this.cache);
+  }
+
+  /**
+   * Initialize the SDK (required for trading operations)
+   */
+  async initialize(): Promise<void> {
+    if (this._initialized) return;
+    await this.tradingService.initialize();
+    this._initialized = true;
+  }
+
+  /**
+   * Check if SDK is initialized
+   */
+  isInitialized(): boolean {
+    return this._initialized;
   }
 
   // ===== Unified Market Access =====
@@ -277,9 +393,9 @@ export class PolymarketSDK {
       );
     }
 
-    // Enrich with CLOB data
+    // Enrich with MarketService data
     try {
-      const clobMarket = await this.clobApi.getMarket(gammaMarket.conditionId);
+      const clobMarket = await this.markets.getClobMarket(gammaMarket.conditionId);
       return this.mergeMarkets(gammaMarket, clobMarket);
     } catch {
       return this.fromGammaMarket(gammaMarket);
@@ -289,9 +405,9 @@ export class PolymarketSDK {
   private async getMarketByConditionId(
     conditionId: string
   ): Promise<UnifiedMarket> {
-    // CLOB as primary source for conditionId (more reliable)
+    // MarketService as primary source for conditionId (more reliable)
     try {
-      const clobMarket = await this.clobApi.getMarket(conditionId);
+      const clobMarket = await this.markets.getClobMarket(conditionId);
 
       // Try to enrich with Gamma data
       try {
@@ -301,7 +417,7 @@ export class PolymarketSDK {
           return this.mergeMarkets(gammaMarket, clobMarket);
         }
       } catch {
-        // Gamma enrichment failed, use CLOB only
+        // Gamma enrichment failed, use CLOB market only
       }
 
       return this.fromClobMarket(clobMarket);
@@ -319,7 +435,7 @@ export class PolymarketSDK {
    * Get processed orderbook with analytics
    */
   async getOrderbook(conditionId: string): Promise<ProcessedOrderbook> {
-    return this.clobApi.getProcessedOrderbook(conditionId);
+    return this.markets.getProcessedOrderbook(conditionId);
   }
 
   /**
@@ -360,10 +476,10 @@ export class PolymarketSDK {
 
   private mergeMarkets(
     gamma: import('./clients/gamma-api.js').GammaMarket,
-    clob: import('./clients/clob-api.js').ClobMarket
+    clob: import('./services/market-service.js').Market
   ): UnifiedMarket {
-    const yesToken = clob.tokens.find((t) => t.outcome === 'Yes');
-    const noToken = clob.tokens.find((t) => t.outcome === 'No');
+    const yesToken = clob.tokens.find((t: import('./services/market-service.js').MarketToken) => t.outcome === 'Yes');
+    const noToken = clob.tokens.find((t: import('./services/market-service.js').MarketToken) => t.outcome === 'No');
 
     return {
       conditionId: clob.conditionId,
@@ -417,10 +533,10 @@ export class PolymarketSDK {
   }
 
   private fromClobMarket(
-    clob: import('./clients/clob-api.js').ClobMarket
+    clob: import('./services/market-service.js').Market
   ): UnifiedMarket {
-    const yesToken = clob.tokens.find((t) => t.outcome === 'Yes');
-    const noToken = clob.tokens.find((t) => t.outcome === 'No');
+    const yesToken = clob.tokens.find((t: import('./services/market-service.js').MarketToken) => t.outcome === 'Yes');
+    const noToken = clob.tokens.find((t: import('./services/market-service.js').MarketToken) => t.outcome === 'No');
 
     return {
       conditionId: clob.conditionId,
@@ -431,7 +547,7 @@ export class PolymarketSDK {
         yes: { tokenId: yesToken?.tokenId || '', price: yesToken?.price || 0.5 },
         no: { tokenId: noToken?.tokenId || '', price: noToken?.price || 0.5 },
       },
-      volume: 0, // CLOB doesn't have volume
+      volume: 0, // CLOB API doesn't have volume
       volume24hr: undefined,
       liquidity: 0,
       spread: undefined,

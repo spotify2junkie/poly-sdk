@@ -61,7 +61,7 @@ async function main() {
     if (!market.conditionId) continue;
 
     try {
-      const orderbook = await sdk.clobApi.getProcessedOrderbook(market.conditionId);
+      const orderbook = await sdk.markets.getProcessedOrderbook(market.conditionId);
 
       analyzed++;
 
@@ -89,7 +89,7 @@ async function main() {
           bidSum: orderbook.summary.bidSum,
           longArbProfit: orderbook.summary.longArbProfit,
           shortArbProfit: orderbook.summary.shortArbProfit,
-          spread: orderbook.summary.spread,
+          spread: orderbook.summary.yesSpread,
           volume24h: market.volume24hr || 0,
         });
       }

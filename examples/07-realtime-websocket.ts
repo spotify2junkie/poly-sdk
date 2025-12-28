@@ -1,19 +1,18 @@
 /**
  * Example 7: Real-time WebSocket
  *
- * This example demonstrates real-time price updates:
- * - WebSocketManager for low-level access
- * - RealtimeService for subscription management
+ * This example demonstrates real-time price updates using RealtimeServiceV2:
+ * - Connection management
+ * - Market data subscriptions (orderbook, prices, trades)
+ * - Crypto price subscriptions (BTC, ETH)
  *
  * Run: npx tsx examples/07-realtime-websocket.ts
  */
 
-import { PolymarketSDK } from '../src/index.js';
-import { WebSocketManager } from '../src/clients/websocket-manager.js';
-import { RealtimeService } from '../src/services/realtime-service.js';
+import { PolymarketSDK, RealtimeServiceV2 } from '../src/index.js';
 
 async function main() {
-  console.log('=== Real-time WebSocket Demo ===\n');
+  console.log('=== Real-time WebSocket Demo (V2) ===\n');
 
   const sdk = new PolymarketSDK();
 
@@ -44,25 +43,39 @@ async function main() {
     return;
   }
 
-  // 3. Create RealtimeService and subscribe
-  console.log('3. Subscribing to real-time updates...');
-  const wsManager = new WebSocketManager({ enableLogging: true });
-  const realtime = new RealtimeService(wsManager);
+  // 3. Create RealtimeServiceV2 and connect
+  console.log('3. Connecting to WebSocket...');
+  const realtime = new RealtimeServiceV2({ debug: false });
 
+  // Wait for connection
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('Connection timeout')), 10000);
+
+    realtime.once('connected', () => {
+      clearTimeout(timeout);
+      console.log('   Connected!\n');
+      resolve();
+    });
+
+    realtime.connect();
+  });
+
+  // 4. Subscribe to market data
+  console.log('4. Subscribing to market updates...');
   let updateCount = 0;
   const maxUpdates = 10;
 
-  const subscription = await realtime.subscribeMarket(yesTokenId, noTokenId, {
-    onPriceUpdate: (update) => {
+  const subscription = realtime.subscribeMarket(yesTokenId, noTokenId, {
+    onOrderbook: (book) => {
       updateCount++;
+      const side = book.assetId === yesTokenId ? 'YES' : 'NO';
+      const bestBid = book.bids[0];
+      const bestAsk = book.asks[0];
+      console.log(`   [${new Date().toLocaleTimeString()}] ${side} Book: Bid ${bestBid?.price.toFixed(4)} (${bestBid?.size.toFixed(0)}) | Ask ${bestAsk?.price.toFixed(4)} (${bestAsk?.size.toFixed(0)})`);
+    },
+    onPriceUpdate: (update) => {
       const side = update.assetId === yesTokenId ? 'YES' : 'NO';
       console.log(`   [${new Date().toLocaleTimeString()}] ${side} Price: ${update.price.toFixed(4)} (mid: ${update.midpoint.toFixed(4)}, spread: ${update.spread.toFixed(4)})`);
-    },
-    onBookUpdate: (update) => {
-      const side = update.assetId === yesTokenId ? 'YES' : 'NO';
-      const bestBid = update.bids[0];
-      const bestAsk = update.asks[0];
-      console.log(`   [${new Date().toLocaleTimeString()}] ${side} Book: Bid ${bestBid?.price.toFixed(4)} (${bestBid?.size.toFixed(0)}) | Ask ${bestAsk?.price.toFixed(4)} (${bestAsk?.size.toFixed(0)})`);
     },
     onLastTrade: (trade) => {
       const side = trade.assetId === yesTokenId ? 'YES' : 'NO';
@@ -70,8 +83,8 @@ async function main() {
     },
     onPairUpdate: (update) => {
       const spread = update.spread;
-      const arbSignal = spread < 0.99 ? '🔴 ARB!' : spread > 1.01 ? '🔴 ARB!' : '✅';
-      console.log(`   [${new Date().toLocaleTimeString()}] PAIR: YES ${update.yes.price.toFixed(4)} + NO ${update.no.price.toFixed(4)} = ${spread.toFixed(4)} ${arbSignal}`);
+      const arbSignal = spread < 0.99 ? 'ARB!' : spread > 1.01 ? 'ARB!' : 'OK';
+      console.log(`   [${new Date().toLocaleTimeString()}] PAIR: YES ${update.yes.price.toFixed(4)} + NO ${update.no.price.toFixed(4)} = ${spread.toFixed(4)} [${arbSignal}]`);
     },
     onError: (error) => {
       console.error(`   Error: ${error.message}`);
@@ -79,10 +92,19 @@ async function main() {
   });
 
   console.log(`   Subscription ID: ${subscription.id}`);
-  console.log(`   Subscribed to: ${subscription.assetIds.length} assets`);
+  console.log(`   Subscribed to: ${subscription.tokenIds.length} tokens`);
   console.log(`\n   Waiting for updates (max ${maxUpdates})...\n`);
 
-  // 4. Wait for some updates
+  // 5. Optionally subscribe to crypto prices (BTC, ETH)
+  console.log('5. Subscribing to crypto prices...');
+  const cryptoSub = realtime.subscribeCryptoPrices(['BTCUSDT', 'ETHUSDT'], {
+    onPrice: (price) => {
+      console.log(`   [${new Date().toLocaleTimeString()}] ${price.symbol}: $${price.price.toFixed(2)}`);
+    },
+  });
+  console.log(`   Crypto subscription ID: ${cryptoSub.id}\n`);
+
+  // 6. Wait for some updates
   await new Promise<void>((resolve) => {
     const interval = setInterval(() => {
       if (updateCount >= maxUpdates) {
@@ -98,18 +120,20 @@ async function main() {
     }, 30000);
   });
 
-  // 5. Check cached prices
-  console.log('\n4. Cached prices:');
+  // 7. Check cached prices
+  console.log('\n6. Cached prices:');
   const prices = realtime.getAllPrices();
   for (const [assetId, price] of prices) {
     const side = assetId === yesTokenId ? 'YES' : 'NO';
     console.log(`   ${side}: ${price.price.toFixed(4)}`);
   }
 
-  // 6. Cleanup
-  console.log('\n5. Cleaning up...');
-  await subscription.unsubscribe();
-  console.log('   Unsubscribed');
+  // 8. Cleanup
+  console.log('\n7. Cleaning up...');
+  subscription.unsubscribe();
+  cryptoSub.unsubscribe();
+  realtime.disconnect();
+  console.log('   Disconnected');
 
   console.log('\n=== Done ===');
 }

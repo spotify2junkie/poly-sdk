@@ -14,11 +14,11 @@
  */
 
 import {
-    WebSocketManager,
+    RealtimeServiceV2,
     CTFClient,
-    TradingClient,
+    TradingService,
     RateLimiter,
-    type BookUpdate,
+    createUnifiedCache,
     type TokenIds,
   } from '../../src/index.js';
   
@@ -83,9 +83,9 @@ import {
     lastUpdate: 0,
   };
   
-  let wsManager: WebSocketManager;
+  let realtimeService: RealtimeServiceV2;
   let ctf: CTFClient | null = null;
-  let tradingClient: TradingClient | null = null;
+  let tradingService: TradingService | null = null;
   
   let isExecuting = false;
   let lastArbCheck = 0;
@@ -116,14 +116,15 @@ import {
     console.log('');
   
     const rateLimiter = new RateLimiter();
-  
+    const cache = createUnifiedCache();
+
     if (PRIVATE_KEY) {
       ctf = new CTFClient({ privateKey: PRIVATE_KEY, rpcUrl: RPC_URL });
       console.log(`Wallet: ${ctf.getAddress()}`);
-  
-      tradingClient = new TradingClient(rateLimiter, { privateKey: PRIVATE_KEY, chainId: 137 });
-      await tradingClient.initialize();
-      console.log('Trading client initialized');
+
+      tradingService = new TradingService(rateLimiter, cache, { privateKey: PRIVATE_KEY, chainId: 137 });
+      await tradingService.initialize();
+      console.log('Trading service initialized');
   
       await updateBalance();
       console.log(`USDC.e Balance: ${balance.usdc.toFixed(2)}`);
@@ -143,19 +144,31 @@ import {
     console.log('═══════════════════════════════════════════════════════════════');
     console.log('Connecting to WebSocket...');
     console.log('');
-  
-    wsManager = new WebSocketManager({ enableLogging: false });
-    wsManager.on('bookUpdate', handleBookUpdate);
-    wsManager.on('connected', ({ assetIds }) => console.log(`WebSocket connected for ${assetIds.length} assets`));
-    wsManager.on('error', (error) => console.error('WebSocket error:', error.message));
-  
-    await wsManager.subscribe([MARKET_CONFIG.yesTokenId, MARKET_CONFIG.noTokenId]);
+
+    realtimeService = new RealtimeServiceV2({ debug: false });
+
+    // Wait for connection
+    const connectedPromise = new Promise<void>((resolve) => {
+      realtimeService.once('connected', resolve);
+    });
+
+    realtimeService.connect();
+    await connectedPromise;
+    console.log('WebSocket connected');
+
+    // Subscribe to markets
+    realtimeService.subscribeMarkets([MARKET_CONFIG.yesTokenId, MARKET_CONFIG.noTokenId], {
+      onOrderbook: handleBookUpdate,
+      onError: (error) => console.error('WebSocket error:', error.message),
+    });
+    console.log(`Subscribed to ${MARKET_CONFIG.outcomes[0]} and ${MARKET_CONFIG.outcomes[1]} tokens`);
+
     setInterval(updateBalance, 30000);
-  
+
     process.on('SIGINT', async () => {
       console.log('\n\nShutting down...');
       console.log(`Total opportunities: ${totalOpportunities}, Executed: ${totalExecuted}, Profit: $${totalProfit.toFixed(2)}`);
-      await wsManager.unsubscribeAll();
+      realtimeService.disconnect();
       process.exit(0);
     });
   
@@ -182,14 +195,18 @@ import {
     }
   }
   
-  function handleBookUpdate(update: BookUpdate) {
+  function handleBookUpdate(update: { assetId: string; bids: Array<{ price: string; size: string }>; asks: Array<{ price: string; size: string }> }) {
     const { assetId, bids, asks } = update;
+    // Convert string prices/sizes to numbers
+    const parsedBids = bids.map(b => ({ price: parseFloat(b.price), size: parseFloat(b.size) }));
+    const parsedAsks = asks.map(a => ({ price: parseFloat(a.price), size: parseFloat(a.size) }));
+
     if (assetId === MARKET_CONFIG.yesTokenId) {
-      orderbook.yesBids = bids.sort((a, b) => b.price - a.price);
-      orderbook.yesAsks = asks.sort((a, b) => a.price - b.price);
+      orderbook.yesBids = parsedBids.sort((a, b) => b.price - a.price);
+      orderbook.yesAsks = parsedAsks.sort((a, b) => a.price - b.price);
     } else if (assetId === MARKET_CONFIG.noTokenId) {
-      orderbook.noBids = bids.sort((a, b) => b.price - a.price);
-      orderbook.noAsks = asks.sort((a, b) => a.price - b.price);
+      orderbook.noBids = parsedBids.sort((a, b) => b.price - a.price);
+      orderbook.noAsks = parsedAsks.sort((a, b) => a.price - b.price);
     }
     orderbook.lastUpdate = Date.now();
     checkArbitrage();
@@ -272,7 +289,7 @@ import {
   // ═══════════════════════════════════════════════════════════════════════════════
   
   async function executeLongArb(buyYesPrice: number, buyNoPrice: number, size: number, profitRate: number) {
-    if (!ctf || !tradingClient || isExecuting) return;
+    if (!ctf || !tradingService || isExecuting) return;
     isExecuting = true;
     const startTime = Date.now();
     console.log('\n🔄 Executing Long Arb (Buy → Instant Merge)...');
@@ -288,8 +305,8 @@ import {
       console.log(`   1. Buying tokens in parallel...`);
       const orderStartTime = Date.now();
       const [buyYesResult, buyNoResult] = await Promise.all([
-        tradingClient.createMarketOrder({ tokenId: MARKET_CONFIG.yesTokenId, side: 'BUY', amount: size * buyYesPrice, orderType: 'FOK' }),
-        tradingClient.createMarketOrder({ tokenId: MARKET_CONFIG.noTokenId, side: 'BUY', amount: size * buyNoPrice, orderType: 'FOK' }),
+        tradingService.createMarketOrder({ tokenId: MARKET_CONFIG.yesTokenId, side: 'BUY', amount: size * buyYesPrice, orderType: 'FOK' }),
+        tradingService.createMarketOrder({ tokenId: MARKET_CONFIG.noTokenId, side: 'BUY', amount: size * buyNoPrice, orderType: 'FOK' }),
       ]);
       console.log(`      ${MARKET_CONFIG.outcomes[0]}: ${buyYesResult.success ? '✓' : '✗'}, ${MARKET_CONFIG.outcomes[1]}: ${buyNoResult.success ? '✓' : '✗'} (${Date.now() - orderStartTime}ms)`);
   
@@ -334,7 +351,7 @@ import {
   }
   
   async function executeShortArb(size: number, estProfit: number) {
-    if (!ctf || !tradingClient || isExecuting) return;
+    if (!ctf || !tradingService || isExecuting) return;
     isExecuting = true;
     const startTime = Date.now();
     console.log('\n🔄 Executing Short Arb (Sell Pre-held Tokens)...');
@@ -351,8 +368,8 @@ import {
       console.log(`   1. Selling pre-held tokens in parallel...`);
       const orderStartTime = Date.now();
       const [sellYesResult, sellNoResult] = await Promise.all([
-        tradingClient.createMarketOrder({ tokenId: MARKET_CONFIG.yesTokenId, side: 'SELL', amount: size, orderType: 'FOK' }),
-        tradingClient.createMarketOrder({ tokenId: MARKET_CONFIG.noTokenId, side: 'SELL', amount: size, orderType: 'FOK' }),
+        tradingService.createMarketOrder({ tokenId: MARKET_CONFIG.yesTokenId, side: 'SELL', amount: size, orderType: 'FOK' }),
+        tradingService.createMarketOrder({ tokenId: MARKET_CONFIG.noTokenId, side: 'SELL', amount: size, orderType: 'FOK' }),
       ]);
       console.log(`      ${MARKET_CONFIG.outcomes[0]}: ${sellYesResult.success ? '✓' : '✗'}, ${MARKET_CONFIG.outcomes[1]}: ${sellNoResult.success ? '✓' : '✗'} (${Date.now() - orderStartTime}ms)`);
   

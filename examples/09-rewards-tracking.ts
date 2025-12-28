@@ -11,21 +11,23 @@
  */
 
 import {
-  TradingClient,
+  TradingService,
   RateLimiter,
   PolymarketSDK,
   formatUSDC,
+  createUnifiedCache,
 } from '../src/index.js';
 
 // Test wallet private key
 const PRIVATE_KEY = process.env.POLYMARKET_PRIVATE_KEY || '0xYOUR_PRIVATE_KEY_HERE';
 
 async function main() {
-  console.log('=== Polymarket Rewards Tracking ===\n');
+  console.log('=== Polymarket Rewards Tracking (TradingService) ===\n');
 
   const sdk = new PolymarketSDK();
   const rateLimiter = new RateLimiter();
-  const tradingClient = new TradingClient(rateLimiter, {
+  const cache = createUnifiedCache();
+  const tradingService = new TradingService(rateLimiter, cache, {
     privateKey: PRIVATE_KEY,
   });
 
@@ -33,10 +35,10 @@ async function main() {
   console.log('1. Finding markets with active rewards...\n');
 
   try {
-    await tradingClient.initialize();
-    console.log(`   Wallet: ${tradingClient.getAddress()}\n`);
+    await tradingService.initialize();
+    console.log(`   Wallet: ${tradingService.getAddress()}\n`);
 
-    const rewards = await tradingClient.getCurrentRewards();
+    const rewards = await tradingService.getCurrentRewards();
     console.log(`   Found ${rewards.length} markets with active rewards\n`);
 
     if (rewards.length > 0) {
@@ -71,7 +73,7 @@ async function main() {
     // ===== 2. Check Order Scoring Status =====
     console.log('\n2. Checking if orders are scoring...\n');
 
-    const openOrders = await tradingClient.getOpenOrders();
+    const openOrders = await tradingService.getOpenOrders();
     console.log(`   Open orders: ${openOrders.length}`);
 
     if (openOrders.length > 0) {
@@ -79,15 +81,15 @@ async function main() {
 
       // Check first 5 orders
       for (const order of openOrders.slice(0, 5)) {
-        const isScoring = await tradingClient.isOrderScoring(order.id);
-        const status = isScoring ? '✅ SCORING' : '❌ NOT SCORING';
+        const isScoring = await tradingService.isOrderScoring(order.id);
+        const status = isScoring ? 'SCORING' : 'NOT SCORING';
         console.log(`   - ${order.side} ${order.originalSize} @ $${order.price.toFixed(4)}: ${status}`);
       }
 
       // Batch check
       if (openOrders.length > 1) {
         const orderIds = openOrders.slice(0, 5).map(o => o.id);
-        const scoringStatus = await tradingClient.areOrdersScoring(orderIds);
+        const scoringStatus = await tradingService.areOrdersScoring(orderIds);
         const scoringCount = Object.values(scoringStatus).filter(Boolean).length;
         console.log(`\n   Summary: ${scoringCount}/${orderIds.length} orders are scoring`);
       }
@@ -107,17 +109,18 @@ async function main() {
     }
 
     console.log('   Daily earnings (last 7 days):');
-    console.log('   ' + '─'.repeat(40));
+    console.log('   ' + '-'.repeat(40));
 
     let totalWeeklyEarnings = 0;
 
     for (const date of dates) {
       try {
-        const earnings = await tradingClient.getTotalEarningsForDay(date);
-        totalWeeklyEarnings += earnings.totalEarnings;
+        const earnings = await tradingService.getEarningsForDay(date);
+        const dayTotal = earnings.reduce((sum, e) => sum + e.earnings, 0);
+        totalWeeklyEarnings += dayTotal;
 
-        if (earnings.totalEarnings > 0) {
-          console.log(`   ${date}: ${formatUSDC(earnings.totalEarnings)}`);
+        if (dayTotal > 0) {
+          console.log(`   ${date}: ${formatUSDC(dayTotal)}`);
         } else {
           console.log(`   ${date}: $0.00`);
         }
@@ -126,45 +129,22 @@ async function main() {
       }
     }
 
-    console.log('   ' + '─'.repeat(40));
+    console.log('   ' + '-'.repeat(40));
     console.log(`   Weekly Total: ${formatUSDC(totalWeeklyEarnings)}`);
 
-    // ===== 4. Get Reward Percentages =====
-    console.log('\n4. Market reward percentages...\n');
+    // ===== 4. Check Balance =====
+    console.log('\n4. Account balance...\n');
 
     try {
-      const percentages = await tradingClient.getRewardPercentages();
-      const entries = Object.entries(percentages);
-
-      if (entries.length > 0) {
-        console.log('   Top markets by reward percentage:');
-
-        // Sort by percentage (descending)
-        const sorted = entries.sort((a, b) => b[1] - a[1]).slice(0, 10);
-
-        for (const [market, percentage] of sorted) {
-          console.log(`   - ${market.slice(0, 30)}...: ${(percentage * 100).toFixed(2)}%`);
-        }
-      } else {
-        console.log('   No reward percentages available');
-      }
-    } catch (error) {
-      console.log('   Reward percentages not available');
-    }
-
-    // ===== 5. Check Balance =====
-    console.log('\n5. Account balance...\n');
-
-    try {
-      const balance = await tradingClient.getBalanceAllowance('COLLATERAL');
+      const balance = await tradingService.getBalanceAllowance('COLLATERAL');
       console.log(`   USDC Balance: ${balance.balance}`);
       console.log(`   USDC Allowance: ${balance.allowance}`);
     } catch {
       console.log('   Balance check not available');
     }
 
-    // ===== 6. Reward Optimization Tips =====
-    console.log('\n6. Reward Optimization Tips\n');
+    // ===== 5. Reward Optimization Tips =====
+    console.log('\n5. Reward Optimization Tips\n');
     console.log('   ┌─────────────────────────────────────────────────────────────┐');
     console.log('   │ How to maximize market making rewards:                       │');
     console.log('   ├─────────────────────────────────────────────────────────────┤');

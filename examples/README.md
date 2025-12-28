@@ -87,31 +87,49 @@ High-level service abstractions.
 
 ### 07 - Real-time WebSocket
 
-Live orderbook streaming.
+Live market data streaming using `RealtimeServiceV2`.
 
-- Connect to Polymarket WebSocket
-- Real-time price updates
-- Orderbook change events
+- Connect to Polymarket WebSocket (official client)
+- Real-time orderbook updates
+- Price change events
+- Last trade notifications
+- Crypto price subscriptions (BTC, ETH)
+
+```typescript
+import { RealtimeServiceV2 } from '@catalyst-team/poly-sdk';
+
+const realtime = new RealtimeServiceV2({ debug: false });
+realtime.connect();
+
+realtime.once('connected', () => {
+  const sub = realtime.subscribeMarket(yesTokenId, noTokenId, {
+    onOrderbook: (book) => console.log('Book:', book),
+    onPriceUpdate: (update) => console.log('Price:', update),
+  });
+});
+```
 
 ### 08 - Trading Orders
 
-Place and manage orders (requires private key).
+Trading functionality using `TradingService` (requires private key).
 
 ```bash
-POLY_PRIVKEY=0x... npx tsx examples/08-trading-orders.ts
+POLYMARKET_PRIVATE_KEY=0x... npx tsx examples/08-trading-orders.ts
 ```
 
-- Create limit/market orders
-- Cancel orders
-- Check order status
+- Market data: `getMarket()`, `getOrderbook()`, `getPricesHistory()`
+- Create limit/market orders: `createLimitOrder()`, `createMarketOrder()`
+- Cancel orders: `cancelOrder()`, `cancelAllOrders()`
+- Check order status: `getOpenOrders()`, `getTrades()`
+- Rewards: `getCurrentRewards()`, `isOrderScoring()`
 
 ### 09 - Rewards Tracking
 
-Track liquidity provider rewards.
+Track liquidity provider rewards using `TradingService`.
 
-- Earned rewards by market
-- Order scoring metrics
-- Reward rate analysis
+- Find markets with active rewards
+- Check if orders are scoring
+- Track daily earnings
 
 ### 10 - CTF Operations
 
@@ -174,6 +192,6 @@ effectiveSellNo = max(NO.bid, 1 - YES.ask)
 
 | Variable | Description | Required For |
 |----------|-------------|--------------|
-| `POLY_PRIVKEY` | Private key for trading | 08, 09, 10 |
+| `POLYMARKET_PRIVATE_KEY` | Private key for trading | 08, 09, 10 |
 | `SCAN_INTERVAL_MS` | Arb scan interval (ms) | 12 |
 | `PROFIT_THRESHOLD` | Min arb profit % | 11, 12 |

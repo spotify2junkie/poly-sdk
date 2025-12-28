@@ -40,9 +40,9 @@ export interface PolySDKOptions {
   chainId?: number;
 
   /**
-   * Ethereum signer for trading operations
+   * Private key for trading operations (hex string starting with 0x)
    */
-  signer?: unknown;
+  privateKey?: string;
 
   /**
    * API credentials for trading

@@ -37,8 +37,9 @@
 
 import {
     CTFClient,
-    TradingClient,
+    TradingService,
     RateLimiter,
+    createUnifiedCache,
   } from '../../src/index.js';
   
   // ============== Market Configuration ==============
@@ -119,13 +120,14 @@ import {
       rpcUrl: 'https://polygon-rpc.com',
     });
   
-    // Initialize trading client for selling excess tokens
+    // Initialize trading service for selling excess tokens
     const rateLimiter = new RateLimiter();
-    const tradingClient = new TradingClient(rateLimiter, {
+    const cache = createUnifiedCache();
+    const tradingService = new TradingService(rateLimiter, cache, {
       privateKey,
       chainId: 137,
     });
-    await tradingClient.initialize();
+    await tradingService.initialize();
   
     console.log(`Wallet: ${ctf.getAddress()}`);
     console.log(`Condition: ${CONDITION_ID.slice(0, 20)}...`);
@@ -137,7 +139,7 @@ import {
     console.log();
   
     // Get initial balance
-    const balance = await getBalance(ctf, tradingClient);
+    const balance = await getBalance(ctf, tradingService);
     const totalCapital = TOTAL_CAPITAL || balance.total;
   
     console.log(`Total Capital: $${totalCapital.toFixed(2)}`);
@@ -165,7 +167,7 @@ import {
   
     while (true) {
       try {
-        const currentBalance = await getBalance(ctf, tradingClient);
+        const currentBalance = await getBalance(ctf, tradingService);
         const actions = calculateRebalanceActions(currentBalance, totalCapital);
   
         // Get highest priority action
@@ -246,7 +248,7 @@ import {
                   break;
   
                 case 'sell_yes':
-                  const sellYesResult = await tradingClient.createMarketOrder({
+                  const sellYesResult = await tradingService.createMarketOrder({
                     tokenId: YES_TOKEN_ID,
                     side: 'SELL',
                     amount: action.amount,
@@ -261,7 +263,7 @@ import {
                   break;
   
                 case 'sell_no':
-                  const sellNoResult = await tradingClient.createMarketOrder({
+                  const sellNoResult = await tradingService.createMarketOrder({
                     tokenId: NO_TOKEN_ID,
                     side: 'SELL',
                     amount: action.amount,
@@ -296,7 +298,7 @@ import {
     }
   }
   
-  async function getBalance(ctf: CTFClient, _tradingClient: TradingClient): Promise<Balance> {
+  async function getBalance(ctf: CTFClient, _tradingService: TradingService): Promise<Balance> {
     // Get USDC.e balance
     const usdcBalance = await ctf.getUsdcBalance();
     const usdc = parseFloat(usdcBalance);

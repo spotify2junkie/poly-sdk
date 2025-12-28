@@ -53,12 +53,13 @@
     "access": "public"
   },
   "dependencies": {
-    "@nevuamarkets/poly-websockets": "^0.3.0",
-    "@polymarket/clob-client": "4.22.8",
+    "@polymarket/clob-client": "file:../../../clob-client",
+    "@polymarket/real-time-data-client": "file:../../../poly-related/real-time-data-client",
     "@catalyst-team/cache": "workspace:*",
     "@types/ws": "^8.18.1",
     "bottleneck": "^2.19.5",
     "ethers": "5",
+    "isomorphic-ws": "^5.0.0",
     "ws": "^8.18.3"
   },
   "devDependencies": {

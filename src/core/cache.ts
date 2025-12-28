@@ -82,4 +82,5 @@ export const CACHE_TTL = {
   WALLET_POSITIONS: 5 * 60 * 1000, // 5 minutes
   LEADERBOARD: 60 * 60 * 1000, // 1 hour
   TICK_SIZE: 24 * 60 * 60 * 1000, // 24 hours
+  ACTIVITY: 2 * 60 * 1000, // 2 minutes (wallet activity data)
 };

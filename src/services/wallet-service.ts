@@ -6,11 +6,130 @@
  * - Position tracking
  * - Activity monitoring
  * - Sell detection for follow wallet strategy
+ * - Time-based leaderboard and wallet stats
  */
 
-import { DataApiClient, Position, Activity, LeaderboardEntry, LeaderboardPage } from '../clients/data-api.js';
+import {
+  DataApiClient,
+  Position,
+  Activity,
+  LeaderboardEntry,
+  LeaderboardPage,
+  LeaderboardTimePeriod,
+  LeaderboardOrderBy,
+  LeaderboardCategory,
+} from '../clients/data-api.js';
+import { SubgraphClient, OrderFilledEvent } from '../clients/subgraph.js';
 import type { UnifiedCache } from '../core/unified-cache.js';
 import { CACHE_TTL } from '../core/unified-cache.js';
+
+// ===== Time Period Types =====
+
+/** Time period (lowercase for SDK, maps to API's uppercase) */
+export type TimePeriod = 'day' | 'week' | 'month' | 'all';
+
+/** Sort criteria for period leaderboard (official API supports PNL and VOL) */
+export type LeaderboardSortBy = 'volume' | 'pnl';
+
+// Re-export API types for convenience
+export type { LeaderboardTimePeriod, LeaderboardOrderBy, LeaderboardCategory };
+
+/**
+ * Collateral Asset ID (USDC)
+ * In Polymarket orderbook, "0" represents the collateral token (USDC)
+ */
+const COLLATERAL_ASSET_ID = '0';
+
+/**
+ * Check if an asset ID is collateral (USDC) or outcome token
+ */
+function isCollateralAsset(assetId: string): boolean {
+  return assetId === COLLATERAL_ASSET_ID;
+}
+
+/**
+ * Parsed trade from OrderFilledEvent
+ */
+export interface ParsedTrade {
+  timestamp: number;
+  user: string;
+  role: 'maker' | 'taker';
+  side: 'BUY' | 'SELL';
+  tokenId: string;          // Outcome token ID
+  tokenAmount: number;      // Outcome token 数量
+  usdcAmount: number;       // USDC 数量
+  price: number;            // 价格 (USDC per token)
+}
+
+/**
+ * Position tracking for PnL calculation
+ */
+export interface TokenPosition {
+  tokenId: string;
+  amount: number;           // 当前持仓数量
+  avgCost: number;          // 平均成本
+  totalCost: number;        // 总成本
+  realizedPnl: number;      // 已实现盈亏
+}
+
+/**
+ * User stats with PnL
+ */
+export interface UserPeriodStats {
+  address: string;
+  volume: number;           // 总 USDC 成交量
+  tradeCount: number;
+  buyCount: number;
+  sellCount: number;
+  buyVolume: number;        // 买入 USDC 量
+  sellVolume: number;       // 卖出 USDC 量
+  realizedPnl: number;      // 已实现盈亏
+  unrealizedPnl: number;    // 未实现盈亏 (需要当前价格)
+  positions: Map<string, TokenPosition>;  // 各 token 持仓
+}
+
+export interface PeriodLeaderboardEntry {
+  address: string;
+  rank: number;
+  // Core metrics from official API
+  volume: number;           // 时间段内成交量 (USDC)
+  pnl: number;              // 时间段内盈亏 (USDC) - 官方 API 提供
+  // PnL breakdown (官方 API 不区分已实现/未实现)
+  totalPnl: number;         // 总盈亏 = pnl
+  realizedPnl: number;      // 已实现盈亏
+  unrealizedPnl: number;    // 未实现盈亏
+  // 交易统计 (部分来自官方 API)
+  tradeCount: number;       // 时间段内成交次数
+  buyCount: number;         // 买入次数
+  sellCount: number;        // 卖出次数
+  buyVolume: number;        // 买入金额
+  sellVolume: number;       // 卖出金额
+  // 兼容旧字段
+  makerVolume: number;
+  takerVolume: number;
+  // 用户资料 (来自官方 API)
+  userName?: string;
+  profileImage?: string;
+}
+
+export interface WalletPeriodStats {
+  address: string;
+  period: TimePeriod;
+  startTime: number;        // Unix timestamp
+  endTime: number;          // Unix timestamp
+  // 成交统计
+  volume: number;           // 总成交量 (USDC)
+  tradeCount: number;       // 成交次数
+  makerVolume: number;
+  takerVolume: number;
+  makerCount: number;
+  takerCount: number;
+  // 活动统计
+  splitCount: number;
+  mergeCount: number;
+  redemptionCount: number;
+  redemptionPayout: number; // 赎回金额
+}
 
 export interface WalletProfile {
   address: string;
@@ -46,8 +165,28 @@ export interface SellActivityResult {
 export class WalletService {
   constructor(
     private dataApi: DataApiClient,
+    private subgraph: SubgraphClient,
     private cache: UnifiedCache
   ) {}
+
+  // ===== Time Period Helpers =====
+
+  /**
+   * Get start timestamp for a time period
+   */
+  private getPeriodStartTime(period: TimePeriod): number {
+    const now = Math.floor(Date.now() / 1000);
+    switch (period) {
+      case 'day':
+        return now - 24 * 60 * 60;
+      case 'week':
+        return now - 7 * 24 * 60 * 60;
+      case 'month':
+        return now - 30 * 24 * 60 * 60;
+      case 'all':
+        return 0;
+    }
+  }
 
   // ===== Wallet Analysis =====
 
@@ -136,6 +275,497 @@ export class WalletService {
   async getTopTraders(limit = 10): Promise<LeaderboardEntry[]> {
     const leaderboard = await this.dataApi.getLeaderboard({ limit });
     return leaderboard.entries;
+  }
+
+  // ===== Time-Based Leaderboard =====
+
+  /**
+   * Get leaderboard by time period using official Polymarket API
+   *
+   * Uses the official Data API which supports time period filtering.
+   * This is the recommended method as it uses server-side calculations.
+   *
+   * @param period - Time period: 'day', 'week', 'month', or 'all'
+   * @param limit - Maximum entries to return (default: 50, max: 50)
+   * @param sortBy - Sort criteria: 'volume' or 'pnl' (default: 'pnl')
+   * @param category - Market category filter (default: 'OVERALL')
+   *
+   * @example
+   * ```typescript
+   * // Get top traders of the week by PnL
+   * const weeklyByPnl = await walletService.getLeaderboardByPeriod('week', 20, 'pnl');
+   *
+   * // Get top traders by volume
+   * const weeklyByVolume = await walletService.getLeaderboardByPeriod('week', 20, 'volume');
+   *
+   * // Get politics category leaderboard
+   * const politics = await walletService.getLeaderboardByPeriod('week', 20, 'pnl', 'POLITICS');
+   * ```
+   */
+  async getLeaderboardByPeriod(
+    period: TimePeriod,
+    limit = 50,
+    sortBy: LeaderboardSortBy = 'pnl',
+    category: LeaderboardCategory = 'OVERALL'
+  ): Promise<PeriodLeaderboardEntry[]> {
+    // Map lowercase period to API's uppercase format
+    const timePeriodMap: Record<TimePeriod, LeaderboardTimePeriod> = {
+      day: 'DAY',
+      week: 'WEEK',
+      month: 'MONTH',
+      all: 'ALL',
+    };
+
+    // Map sortBy to API's orderBy format
+    const orderByMap: Record<LeaderboardSortBy, LeaderboardOrderBy> = {
+      volume: 'VOL',
+      pnl: 'PNL',
+    };
+
+    const timePeriod = timePeriodMap[period];
+    const orderBy = orderByMap[sortBy];
+
+    // Use official API
+    const result = await this.dataApi.getLeaderboard({
+      timePeriod,
+      orderBy,
+      category,
+      limit,
+    });
+
+    // Map to PeriodLeaderboardEntry format
+    return result.entries.map((entry, index) => ({
+      address: entry.address,
+      rank: entry.rank || index + 1,
+      volume: entry.volume,
+      pnl: entry.pnl,
+      // API provides combined PnL, set as total
+      totalPnl: entry.pnl,
+      realizedPnl: entry.pnl, // API doesn't separate realized/unrealized
+      unrealizedPnl: 0,
+      // API doesn't provide these breakdowns
+      tradeCount: entry.trades || 0,
+      buyCount: 0,
+      sellCount: 0,
+      buyVolume: 0,
+      sellVolume: 0,
+      makerVolume: 0,
+      takerVolume: 0,
+      // User profile
+      userName: entry.userName,
+      profileImage: entry.profileImage,
+    }));
+  }
+
+  /**
+   * Get a specific user's PnL and ranking for a time period
+   *
+   * Uses the official Data API's user filter to get a single user's stats.
+   *
+   * @param address - User's wallet address
+   * @param period - Time period: 'day', 'week', 'month', or 'all'
+   * @param category - Market category filter (default: 'OVERALL')
+   *
+   * @example
+   * ```typescript
+   * // Get user's weekly PnL
+   * const stats = await walletService.getUserPeriodPnl(address, 'week');
+   * console.log(`Rank: #${stats.rank}, PnL: $${stats.pnl}`);
+   *
+   * // Get user's monthly PnL in politics category
+   * const politicsStats = await walletService.getUserPeriodPnl(address, 'month', 'POLITICS');
+   * ```
+   */
+  async getUserPeriodPnl(
+    address: string,
+    period: TimePeriod,
+    category: LeaderboardCategory = 'OVERALL'
+  ): Promise<PeriodLeaderboardEntry | null> {
+    // Map lowercase period to API's uppercase format
+    const timePeriodMap: Record<TimePeriod, LeaderboardTimePeriod> = {
+      day: 'DAY',
+      week: 'WEEK',
+      month: 'MONTH',
+      all: 'ALL',
+    };
+
+    const timePeriod = timePeriodMap[period];
+
+    // Use official API with user filter
+    const result = await this.dataApi.getLeaderboard({
+      timePeriod,
+      orderBy: 'PNL',
+      category,
+      user: address,
+      limit: 1,
+    });
+
+    if (result.entries.length === 0) {
+      return null;
+    }
+
+    const entry = result.entries[0];
+    return {
+      address: entry.address,
+      rank: entry.rank || 0,
+      volume: entry.volume,
+      pnl: entry.pnl,
+      totalPnl: entry.pnl,
+      realizedPnl: entry.pnl,
+      unrealizedPnl: 0,
+      tradeCount: entry.trades || 0,
+      buyCount: 0,
+      sellCount: 0,
+      buyVolume: 0,
+      sellVolume: 0,
+      makerVolume: 0,
+      takerVolume: 0,
+      userName: entry.userName,
+      profileImage: entry.profileImage,
+    };
+  }
+
+  /**
+   * Get wallet stats for a specific time period
+   *
+   * Combines data from Orderbook Subgraph (trades) and Activity Subgraph (splits/merges/redemptions)
+   *
+   * @param address - Wallet address
+   * @param period - Time period: 'day', 'week', 'month', or 'all'
+   *
+   * @example
+   * ```typescript
+   * // Get wallet's monthly stats
+   * const stats = await walletService.getWalletStatsByPeriod(address, 'month');
+   * console.log(`Monthly volume: $${stats.volume}`);
+   * ```
+   */
+  async getWalletStatsByPeriod(
+    address: string,
+    period: TimePeriod
+  ): Promise<WalletPeriodStats> {
+    const startTime = this.getPeriodStartTime(period);
+    const endTime = Math.floor(Date.now() / 1000);
+    const cacheKey = `wallet:stats:${address}:${period}`;
+
+    return this.cache.getOrSet(cacheKey, CACHE_TTL.ACTIVITY, async () => {
+      // Fetch data in parallel
+      const [makerFills, takerFills, splits, merges, redemptions] = await Promise.all([
+        this.subgraph.getMakerFills(address, {
+          first: 1000,
+          where: { timestamp_gte: String(startTime) },
+        }),
+        this.subgraph.getTakerFills(address, {
+          first: 1000,
+          where: { timestamp_gte: String(startTime) },
+        }),
+        this.subgraph.getSplits(address, {
+          first: 500,
+          where: { timestamp_gte: String(startTime) },
+        }),
+        this.subgraph.getMerges(address, {
+          first: 500,
+          where: { timestamp_gte: String(startTime) },
+        }),
+        this.subgraph.getRedemptions(address, {
+          first: 500,
+          where: { timestamp_gte: String(startTime) },
+        }),
+      ]);
+
+      // Calculate volumes (amounts are in micro-units, divide by 1e6 for USDC)
+      const makerVolume = makerFills.reduce(
+        (sum, f) => sum + Number(f.makerAmountFilled) / 1e6,
+        0
+      );
+      const takerVolume = takerFills.reduce(
+        (sum, f) => sum + Number(f.takerAmountFilled) / 1e6,
+        0
+      );
+      const redemptionPayout = redemptions.reduce(
+        (sum, r) => sum + Number(r.payout) / 1e6,
+        0
+      );
+
+      return {
+        address,
+        period,
+        startTime,
+        endTime,
+        volume: makerVolume + takerVolume,
+        tradeCount: makerFills.length + takerFills.length,
+        makerVolume,
+        takerVolume,
+        makerCount: makerFills.length,
+        takerCount: takerFills.length,
+        splitCount: splits.length,
+        mergeCount: merges.length,
+        redemptionCount: redemptions.length,
+        redemptionPayout,
+      };
+    });
+  }
+
+  /**
+   * Fetch all order filled events in a time period with pagination
+   */
+  private async fetchAllFillsInPeriod(
+    startTime: number,
+    maxItems = 5000
+  ): Promise<OrderFilledEvent[]> {
+    const allFills: OrderFilledEvent[] = [];
+    let skip = 0;
+    const first = 1000;
+
+    while (allFills.length < maxItems) {
+      const fills = await this.subgraph.getOrderFilledEvents({
+        first,
+        skip,
+        where: startTime > 0 ? { timestamp_gte: String(startTime) } : undefined,
+        orderBy: 'timestamp',
+        orderDirection: 'desc',
+      });
+
+      if (fills.length === 0) break;
+
+      allFills.push(...fills);
+      skip += first;
+
+      // Break if we got less than requested (no more data)
+      if (fills.length < first) break;
+    }
+
+    return allFills.slice(0, maxItems);
+  }
+
+  /**
+   * Parse OrderFilledEvent into user trades
+   *
+   * OrderFilledEvent 结构:
+   * - makerAssetId = "0" (USDC): Maker 卖 USDC = BUY outcome token
+   * - makerAssetId = 长数字: Maker 卖 outcome token = SELL
+   */
+  private parseOrderFilledEvent(fill: OrderFilledEvent): ParsedTrade[] {
+    const timestamp = Number(fill.timestamp);
+    const makerSellsCollateral = isCollateralAsset(fill.makerAssetId);
+
+    if (makerSellsCollateral) {
+      // Maker: 卖 USDC, 买 Outcome Token = BUY
+      // Taker: 卖 Outcome Token, 买 USDC = SELL
+      const usdcAmount = Number(fill.makerAmountFilled) / 1e6;
+      const tokenAmount = Number(fill.takerAmountFilled) / 1e6;
+      const price = tokenAmount > 0 ? usdcAmount / tokenAmount : 0;
+      const tokenId = fill.takerAssetId;
+
+      return [
+        {
+          timestamp,
+          user: fill.maker.toLowerCase(),
+          role: 'maker',
+          side: 'BUY',
+          tokenId,
+          tokenAmount,
+          usdcAmount,
+          price,
+        },
+        {
+          timestamp,
+          user: fill.taker.toLowerCase(),
+          role: 'taker',
+          side: 'SELL',
+          tokenId,
+          tokenAmount,
+          usdcAmount,
+          price,
+        },
+      ];
+    } else {
+      // Maker: 卖 Outcome Token, 买 USDC = SELL
+      // Taker: 卖 USDC, 买 Outcome Token = BUY
+      const tokenAmount = Number(fill.makerAmountFilled) / 1e6;
+      const usdcAmount = Number(fill.takerAmountFilled) / 1e6;
+      const price = tokenAmount > 0 ? usdcAmount / tokenAmount : 0;
+      const tokenId = fill.makerAssetId;
+
+      return [
+        {
+          timestamp,
+          user: fill.maker.toLowerCase(),
+          role: 'maker',
+          side: 'SELL',
+          tokenId,
+          tokenAmount,
+          usdcAmount,
+          price,
+        },
+        {
+          timestamp,
+          user: fill.taker.toLowerCase(),
+          role: 'taker',
+          side: 'BUY',
+          tokenId,
+          tokenAmount,
+          usdcAmount,
+          price,
+        },
+      ];
+    }
+  }
+
+  /**
+   * Update position with a trade and calculate realized PnL
+   *
+   * 买入: 增加持仓，更新平均成本
+   * 卖出: 减少持仓，计算已实现盈亏 = 卖出收入 - 成本基础
+   */
+  private updatePositionWithTrade(
+    position: TokenPosition,
+    trade: ParsedTrade
+  ): TokenPosition {
+    if (trade.side === 'BUY') {
+      // 买入：增加持仓，更新平均成本
+      const newAmount = position.amount + trade.tokenAmount;
+      const newTotalCost = position.totalCost + trade.usdcAmount;
+      const newAvgCost = newAmount > 0 ? newTotalCost / newAmount : 0;
+
+      return {
+        ...position,
+        amount: newAmount,
+        totalCost: newTotalCost,
+        avgCost: newAvgCost,
+      };
+    } else {
+      // 卖出：减少持仓，计算已实现盈亏
+      const sellAmount = Math.min(trade.tokenAmount, position.amount);
+      const costBasis = sellAmount * position.avgCost;
+      const revenue = (sellAmount / trade.tokenAmount) * trade.usdcAmount;
+      const realizedPnl = revenue - costBasis;
+
+      const newAmount = position.amount - sellAmount;
+      const newTotalCost = newAmount > 0 ? newAmount * position.avgCost : 0;
+
+      return {
+        ...position,
+        amount: newAmount,
+        totalCost: newTotalCost,
+        realizedPnl: position.realizedPnl + realizedPnl,
+      };
+    }
+  }
+
+  /**
+   * Calculate unrealized PnL for a position
+   *
+   * 未实现盈亏 = 当前市值 - 总成本
+   * 假设当前价格约等于最后交易价格 (简化处理)
+   */
+  private calculateUnrealizedPnl(position: TokenPosition, lastPrice: number): number {
+    if (position.amount <= 0) return 0;
+    const currentValue = position.amount * lastPrice;
+    return currentValue - position.totalCost;
+  }
+
+  /**
+   * Aggregate user statistics with PnL calculation from order filled events
+   *
+   * 核心计算流程:
+   * 1. 解析 OrderFilledEvent 为标准化的 ParsedTrade
+   * 2. 按时间顺序处理每笔交易
+   * 3. 追踪每个用户每个 token 的持仓和平均成本
+   * 4. 卖出时计算已实现盈亏
+   * 5. 期末计算未实现盈亏
+   */
+  private aggregateUserStatsWithPnl(
+    fills: OrderFilledEvent[]
+  ): Map<string, UserPeriodStats> {
+    const userStats = new Map<string, UserPeriodStats>();
+    const lastPrices = new Map<string, number>(); // 记录每个 token 的最后交易价格
+
+    // 初始化用户统计
+    const getOrCreateUserStats = (address: string): UserPeriodStats => {
+      let stats = userStats.get(address);
+      if (!stats) {
+        stats = {
+          address,
+          volume: 0,
+          tradeCount: 0,
+          buyCount: 0,
+          sellCount: 0,
+          buyVolume: 0,
+          sellVolume: 0,
+          realizedPnl: 0,
+          unrealizedPnl: 0,
+          positions: new Map(),
+        };
+        userStats.set(address, stats);
+      }
+      return stats;
+    };
+
+    // 解析所有交易
+    const allTrades: ParsedTrade[] = [];
+    for (const fill of fills) {
+      const trades = this.parseOrderFilledEvent(fill);
+      allTrades.push(...trades);
+    }
+
+    // 按时间排序 (升序，确保正确计算成本基础)
+    allTrades.sort((a, b) => a.timestamp - b.timestamp);
+
+    // 处理每笔交易
+    for (const trade of allTrades) {
+      const stats = getOrCreateUserStats(trade.user);
+
+      // 更新交易统计
+      stats.volume += trade.usdcAmount;
+      stats.tradeCount += 1;
+
+      if (trade.side === 'BUY') {
+        stats.buyCount += 1;
+        stats.buyVolume += trade.usdcAmount;
+      } else {
+        stats.sellCount += 1;
+        stats.sellVolume += trade.usdcAmount;
+      }
+
+      // 更新持仓和计算已实现 PnL
+      let position = stats.positions.get(trade.tokenId);
+      if (!position) {
+        position = {
+          tokenId: trade.tokenId,
+          amount: 0,
+          avgCost: 0,
+          totalCost: 0,
+          realizedPnl: 0,
+        };
+      }
+
+      const oldRealizedPnl = position.realizedPnl;
+      position = this.updatePositionWithTrade(position, trade);
+      stats.positions.set(trade.tokenId, position);
+
+      // 累加已实现 PnL
+      stats.realizedPnl += position.realizedPnl - oldRealizedPnl;
+
+      // 记录最后价格
+      if (trade.price > 0) {
+        lastPrices.set(trade.tokenId, trade.price);
+      }
+    }
+
+    // 计算每个用户的未实现 PnL
+    for (const [, stats] of userStats) {
+      let totalUnrealizedPnl = 0;
+      for (const [tokenId, position] of stats.positions) {
+        if (position.amount > 0) {
+          const lastPrice = lastPrices.get(tokenId) || position.avgCost;
+          totalUnrealizedPnl += this.calculateUnrealizedPnl(position, lastPrice);
+        }
+      }
+      stats.unrealizedPnl = totalUnrealizedPnl;
+    }
+
+    return userStats;
   }
 
   /**
