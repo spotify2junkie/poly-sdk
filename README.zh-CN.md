@@ -238,6 +238,8 @@ const sdk = new PolymarketSDK({
 sdk.tradingService  // 交易操作
 sdk.markets         // 市场数据
 sdk.wallets         // 钱包分析
+sdk.realtime        // WebSocket 实时数据
+sdk.smartMoney      // 聪明钱跟踪和跟单交易
 sdk.dataApi         // 直接访问 Data API
 sdk.gammaApi        // 直接访问 Gamma API
 sdk.subgraph        // 通过 Goldsky 访问链上数据
@@ -246,6 +248,11 @@ sdk.subgraph        // 通过 Goldsky 访问链上数据
 await sdk.getMarket(identifier);        // 获取统一市场
 await sdk.getOrderbook(conditionId);    // 获取处理后的订单簿
 await sdk.detectArbitrage(conditionId); // 检测套利机会
+
+// WebSocket 连接（用于聪明钱跟踪）
+sdk.connect();                          // 连接 WebSocket
+await sdk.waitForConnection();          // 等待连接完成
+sdk.disconnect();                       // 断开所有服务
 ```
 
 ---
@@ -500,35 +507,77 @@ const groupSell = await sdk.wallets.trackGroupSellRatio(
 
 ### SmartMoneyService
 
-聪明钱检测和跟单交易。
+聪明钱检测和**实时自动跟单交易**。
 
 ```typescript
-import { SmartMoneyService } from '@catalyst-team/poly-sdk';
+import { PolymarketSDK } from '@catalyst-team/poly-sdk';
 
-const smartMoney = new SmartMoneyService(config);
+const sdk = new PolymarketSDK({ privateKey: '0x...' });
+await sdk.initialize();
 
-// 获取聪明钱钱包
-const wallets = await smartMoney.getSmartMoneyWallets({
-  minPnL: 10000,
-  minWinRate: 0.6,
-  limit: 20,
+// 连接 WebSocket 进行实时监控
+sdk.connect();
+await sdk.waitForConnection();
+
+// 获取聪明钱钱包列表
+const wallets = await sdk.smartMoney.getSmartMoneyList(50);
+
+// 检查地址是否是聪明钱
+const isSmartMoney = await sdk.smartMoney.isSmartMoney('0x...');
+
+// 订阅聪明钱交易
+const sub = sdk.smartMoney.subscribeSmartMoneyTrades(
+  (trade) => {
+    console.log(`${trade.traderName} ${trade.side} ${trade.outcome} @ $${trade.price}`);
+  },
+  { filterAddresses: ['0x...'], minSize: 10 }
+);
+
+// ===== 自动跟单交易 =====
+// 实时跟单 - 聪明钱一旦交易，立即跟单
+
+const subscription = await sdk.smartMoney.startAutoCopyTrading({
+  // 目标选择
+  topN: 50,                    // 跟踪排行榜前 50 名
+  // targetAddresses: ['0x...'], // 或直接指定地址
+
+  // 订单设置
+  sizeScale: 0.1,              // 跟单 10% 的交易量
+  maxSizePerTrade: 10,         // 每笔最多 $10
+  maxSlippage: 0.03,           // 3% 滑点容忍度
+  orderType: 'FOK',            // FOK 或 FAK
+
+  // 过滤
+  minTradeSize: 5,             // 只跟单 > $5 的交易
+  sideFilter: 'BUY',           // 只跟单买入（可选）
+
+  // 测试模式
+  dryRun: true,                // 设为 false 执行真实交易
+
+  // 回调
+  onTrade: (trade, result) => {
+    console.log(`跟单 ${trade.traderName}: ${result.success ? '✅' : '❌'}`);
+  },
+  onError: (error) => console.error(error),
 });
 
-// 跟踪持仓
-const positions = await smartMoney.getWalletPositions('0x...');
+console.log(`正在跟踪 ${subscription.targetAddresses.length} 个钱包`);
 
-// 获取聪明钱交易信号
-const signals = await smartMoney.getTradingSignals(conditionId);
-for (const signal of signals) {
-  console.log(`${signal.wallet}: ${signal.action} ${signal.token}`);
-}
+// 获取统计
+const stats = subscription.getStats();
+console.log(`检测: ${stats.tradesDetected}, 执行: ${stats.tradesExecuted}`);
 
-// 跟单交易（需要私钥）
-await smartMoney.copyTrade(signal, {
-  sizeMultiplier: 0.5, // 原始大小的 50%
-  maxSize: 100,        // 每笔最多 $100
-});
+// 停止
+subscription.stop();
+sdk.disconnect();
 ```
+
+> **注意**: Polymarket 最小订单金额为 **$1**。低于 $1 的订单会被自动跳过。
+
+📁 **完整示例**: 查看 [scripts/smart-money/](scripts/smart-money/) 获取完整可运行的脚本：
+- `04-auto-copy-trading.ts` - 完整功能的自动跟单
+- `05-auto-copy-simple.ts` - 简化的 SDK 用法
+- `06-real-copy-test.ts` - 真实交易测试
 
 ---
 
@@ -729,6 +778,13 @@ import type {
   // 钱包
   WalletProfile,
   SellActivityResult,
+
+  // 聪明钱
+  SmartMoneyWallet,
+  SmartMoneyTrade,
+  AutoCopyTradingOptions,
+  AutoCopyTradingStats,
+  AutoCopyTradingSubscription,
 
   // CTF
   SplitResult,

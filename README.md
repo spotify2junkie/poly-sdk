@@ -238,6 +238,8 @@ const sdk = new PolymarketSDK({
 sdk.tradingService  // Trading operations
 sdk.markets         // Market data
 sdk.wallets         // Wallet analysis
+sdk.realtime        // WebSocket real-time data
+sdk.smartMoney      // Smart money tracking & copy trading
 sdk.dataApi         // Direct Data API access
 sdk.gammaApi        // Direct Gamma API access
 sdk.subgraph        // On-chain data via Goldsky
@@ -246,6 +248,11 @@ sdk.subgraph        // On-chain data via Goldsky
 await sdk.getMarket(identifier);        // Get unified market
 await sdk.getOrderbook(conditionId);    // Get processed orderbook
 await sdk.detectArbitrage(conditionId); // Detect arb opportunity
+
+// WebSocket connection (for smart money tracking)
+sdk.connect();                          // Connect WebSocket
+await sdk.waitForConnection();          // Wait for connection
+sdk.disconnect();                       // Disconnect all services
 ```
 
 ---
@@ -500,35 +507,77 @@ const groupSell = await sdk.wallets.trackGroupSellRatio(
 
 ### SmartMoneyService
 
-Smart money detection and copy trading.
+Smart money detection and **real-time auto copy trading**.
 
 ```typescript
-import { SmartMoneyService } from '@catalyst-team/poly-sdk';
+import { PolymarketSDK } from '@catalyst-team/poly-sdk';
 
-const smartMoney = new SmartMoneyService(config);
+const sdk = new PolymarketSDK({ privateKey: '0x...' });
+await sdk.initialize();
+
+// Connect WebSocket for real-time monitoring
+sdk.connect();
+await sdk.waitForConnection();
 
 // Get smart money wallets
-const wallets = await smartMoney.getSmartMoneyWallets({
-  minPnL: 10000,
-  minWinRate: 0.6,
-  limit: 20,
+const wallets = await sdk.smartMoney.getSmartMoneyList(50);
+
+// Check if address is smart money
+const isSmartMoney = await sdk.smartMoney.isSmartMoney('0x...');
+
+// Subscribe to smart money trades
+const sub = sdk.smartMoney.subscribeSmartMoneyTrades(
+  (trade) => {
+    console.log(`${trade.traderName} ${trade.side} ${trade.outcome} @ $${trade.price}`);
+  },
+  { filterAddresses: ['0x...'], minSize: 10 }
+);
+
+// ===== Auto Copy Trading =====
+// Real-time copy trading - when smart money trades, copy immediately
+
+const subscription = await sdk.smartMoney.startAutoCopyTrading({
+  // Target selection
+  topN: 50,                    // Follow top 50 traders from leaderboard
+  // targetAddresses: ['0x...'], // Or specify addresses directly
+
+  // Order settings
+  sizeScale: 0.1,              // Copy 10% of their trade size
+  maxSizePerTrade: 10,         // Max $10 per trade
+  maxSlippage: 0.03,           // 3% slippage tolerance
+  orderType: 'FOK',            // FOK or FAK
+
+  // Filters
+  minTradeSize: 5,             // Only copy trades > $5
+  sideFilter: 'BUY',           // Only copy BUY trades (optional)
+
+  // Testing
+  dryRun: true,                // Set false for real trades
+
+  // Callbacks
+  onTrade: (trade, result) => {
+    console.log(`Copied ${trade.traderName}: ${result.success ? '✅' : '❌'}`);
+  },
+  onError: (error) => console.error(error),
 });
 
-// Track positions
-const positions = await smartMoney.getWalletPositions('0x...');
+console.log(`Tracking ${subscription.targetAddresses.length} wallets`);
 
-// Get trading signals from smart money
-const signals = await smartMoney.getTradingSignals(conditionId);
-for (const signal of signals) {
-  console.log(`${signal.wallet}: ${signal.action} ${signal.token}`);
-}
+// Get stats
+const stats = subscription.getStats();
+console.log(`Detected: ${stats.tradesDetected}, Executed: ${stats.tradesExecuted}`);
 
-// Copy trade (requires private key)
-await smartMoney.copyTrade(signal, {
-  sizeMultiplier: 0.5, // 50% of original size
-  maxSize: 100,        // Max $100 per trade
-});
+// Stop
+subscription.stop();
+sdk.disconnect();
 ```
+
+> **Note**: Polymarket minimum order size is **$1**. Orders below $1 will be automatically skipped.
+
+📁 **Full examples**: See [scripts/smart-money/](scripts/smart-money/) for complete working scripts:
+- `04-auto-copy-trading.ts` - Full-featured auto copy trading
+- `05-auto-copy-simple.ts` - Simplified SDK usage
+- `06-real-copy-test.ts` - Real trading test
 
 ---
 
@@ -729,6 +778,13 @@ import type {
   // Wallet
   WalletProfile,
   SellActivityResult,
+
+  // Smart Money
+  SmartMoneyWallet,
+  SmartMoneyTrade,
+  AutoCopyTradingOptions,
+  AutoCopyTradingStats,
+  AutoCopyTradingSubscription,
 
   // CTF
   SplitResult,

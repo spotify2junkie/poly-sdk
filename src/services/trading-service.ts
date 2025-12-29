@@ -526,6 +526,10 @@ export class TradingService {
     return this.wallet.address;
   }
 
+  getWallet(): Wallet {
+    return this.wallet;
+  }
+
   getCredentials(): ApiCredentials | null {
     return this.credentials;
   }

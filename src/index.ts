@@ -152,10 +152,9 @@ export { SmartMoneyService } from './services/smart-money-service.js';
 export type {
   SmartMoneyWallet,
   SmartMoneyTrade,
-  PositionSnapshot,
-  TraderPosition,
-  TradingSignal,
-  CopyTradeOptions,
+  AutoCopyTradingOptions,
+  AutoCopyTradingStats,
+  AutoCopyTradingSubscription,
   SmartMoneyServiceConfig,
 } from './services/smart-money-service.js';
 
@@ -306,6 +305,8 @@ import { SubgraphClient } from './clients/subgraph.js';
 import { WalletService } from './services/wallet-service.js';
 import { MarketService } from './services/market-service.js';
 import { TradingService } from './services/trading-service.js';
+import { RealtimeServiceV2 } from './services/realtime-service-v2.js';
+import { SmartMoneyService } from './services/smart-money-service.js';
 import type { UnifiedMarket, ProcessedOrderbook, ArbitrageOpportunity, KLineInterval, KLineCandle, DualKLineData, PolySDKOptions } from './core/types.js';
 import { createUnifiedCache, type UnifiedCache } from './core/unified-cache.js';
 
@@ -326,6 +327,8 @@ export class PolymarketSDK {
   // Services
   public readonly wallets: WalletService;
   public readonly markets: MarketService;
+  public readonly realtime: RealtimeServiceV2;
+  public readonly smartMoney: SmartMoneyService;
 
   // Initialization state
   private _initialized = false;
@@ -354,6 +357,12 @@ export class PolymarketSDK {
     // Initialize services
     this.wallets = new WalletService(this.dataApi, this.subgraph, this.cache);
     this.markets = new MarketService(this.gammaApi, this.dataApi, this.rateLimiter, this.cache);
+    this.realtime = new RealtimeServiceV2();
+    this.smartMoney = new SmartMoneyService(
+      this.wallets,
+      this.realtime,
+      this.tradingService
+    );
   }
 
   /**
@@ -370,6 +379,34 @@ export class PolymarketSDK {
    */
   isInitialized(): boolean {
     return this._initialized;
+  }
+
+  /**
+   * Connect to realtime WebSocket (required for smart money tracking)
+   */
+  connect(): void {
+    this.realtime.connect();
+  }
+
+  /**
+   * Wait for WebSocket connection
+   */
+  async waitForConnection(timeoutMs: number = 10000): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Connection timeout')), timeoutMs);
+      this.realtime.once('connected', () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
+  }
+
+  /**
+   * Disconnect all services and clean up
+   */
+  disconnect(): void {
+    this.smartMoney.disconnect();
+    this.realtime.disconnect();
   }
 
   // ===== Unified Market Access =====
