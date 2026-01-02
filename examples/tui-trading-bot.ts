@@ -920,10 +920,19 @@ async function main(): Promise<void> {
   const sdk = new PolymarketSDK();
   state.sdk = sdk;
 
-  // Initialize SDK for trading
+  // Only initialize trading service if NOT in dry run mode
   if (!DRY_RUN) {
-    await sdk.initialize();
-    console.log('✓ Trading initialized');
+    try {
+      await sdk.initialize();
+      console.log('✓ Trading initialized - LIVE TRADING ENABLED');
+      console.log('⚠️  REAL MONEY AT RISK!');
+    } catch (error) {
+      console.error('✗ Failed to initialize trading:', error);
+      console.error('   Falling back to DRY_RUN mode');
+      process.env.DRY_RUN = 'true';
+    }
+  } else {
+    console.log('✓ DRY-RUN mode - No real trades will be executed');
   }
 
   // Discover markets
