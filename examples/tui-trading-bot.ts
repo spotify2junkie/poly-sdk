@@ -922,17 +922,35 @@ async function main(): Promise<void> {
 
   // Only initialize trading service if NOT in dry run mode
   if (!DRY_RUN) {
+    console.log('⚠️  LIVE TRADING MODE ENABLED');
+    console.log('   This requires:');
+    console.log('   - Valid Polymarket wallet with USDC deposited');
+    console.log('   - Private key that matches your Polymarket account');
+    console.log('   - No Cloudflare block on your IP');
+    console.log('');
+
     try {
       await sdk.initialize();
-      console.log('✓ Trading initialized - LIVE TRADING ENABLED');
+      console.log('✓ Trading initialized successfully');
       console.log('⚠️  REAL MONEY AT RISK!');
     } catch (error) {
       console.error('✗ Failed to initialize trading:', error);
+      if (error instanceof Error && error.message.includes('Could not create api key')) {
+        console.error('');
+        console.error('   This usually means:');
+        console.error('   1. Your private key is not linked to a Polymarket account');
+        console.error('   2. Your IP is being blocked by Cloudflare');
+        console.error('   3. Polymarket API is temporarily unavailable');
+        console.error('');
+        console.error('   Solution: Use DRY_RUN=true for testing, or');
+        console.error('           use a wallet with active Polymarket account');
+      }
       console.error('   Falling back to DRY_RUN mode');
       process.env.DRY_RUN = 'true';
     }
   } else {
     console.log('✓ DRY-RUN mode - No real trades will be executed');
+    console.log('  (Set DRY_RUN=false in .env for live trading)');
   }
 
   // Discover markets
