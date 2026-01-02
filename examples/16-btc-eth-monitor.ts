@@ -7,13 +7,14 @@
  * Phase 2: Trading execution (with PRIVATE_KEY)
  *
  * Usage:
- *   pnpm example:btc-eth-monitor
- *   pnpm example:btc-eth-monitor --up-market-id=0x123... --down-market-id=0x456...
+ *   pnpm example:btc-eth-monitor --auto-discover          # Auto-discover new markets
+ *   pnpm example:btc-eth-monitor --up-market-id=0x123...  # Manual mode
+ *   pnpm example:btc-eth-monitor --down-market-id=0x456... # Manual mode
  */
 
 import 'dotenv/config';
 import { PolymarketSDK } from '../src/index.js';
-import type { OrderbookSnapshot } from '../src/services/realtime-service-v2.js';
+import type { OrderbookSnapshot, MarketEvent } from '../src/services/realtime-service-v2.js';
 import chalk from 'chalk';
 
 // ===== Configuration =====
@@ -21,6 +22,9 @@ const CONFIG = {
   // Market IDs (from .env or CLI flags)
   upMarketId: process.env.UP_MARKET_ID,
   downMarketId: process.env.DOWN_MARKET_ID,
+
+  // Auto-discover mode
+  autoDiscover: process.argv.includes('--auto-discover'),
 
   // Render settings
   maxRenderHz: 10,  // Cap at 10 FPS
@@ -30,6 +34,11 @@ const CONFIG = {
   // Reconnect settings
   reconnectIntervalMs: 3000,  // Try every 3 seconds
   maxReconnectAttempts: 10,   // Give up after 10 attempts
+
+  // Auto-discover filters
+  marketKeywords: ['btc', 'eth', 'bitcoin', 'ethereum'],
+  timeKeywords: ['15m', '15min', '15 minute'],
+  updownKeywords: ['up or down', 'up/down'],
 };
 
 // ===== State =====
@@ -40,6 +49,13 @@ interface MarketState {
   orderbook?: OrderbookSnapshot;
 }
 
+interface DiscoveredMarket {
+  conditionId: string;
+  title: string;
+  question: string;
+  token?: string;
+}
+
 const state = {
   sdk: null as PolymarketSDK | null,
   upMarket: null as MarketState | null,
@@ -47,6 +63,9 @@ const state = {
   lastUpdateTime: 0,
   reconnectAttempts: 0,
   isShuttingDown: false,
+  // Auto-discover state
+  discoveredMarkets: new Map<string, DiscoveredMarket>(), // 'btc' or 'eth' -> market info
+  marketEventSubscription: null as ReturnType<typeof sdk.realtime.subscribeMarketEvents> | null,
 };
 
 const isTTY = process.stdout.isTTY;
@@ -100,6 +119,109 @@ async function loadMarkets(sdk: PolymarketSDK): Promise<void> {
     console.error(chalk.red((error as Error).message));
     process.exit(1);
   }
+}
+
+// ===== Auto-Discovery =====
+function isBTCETH15mMarket(event: MarketEvent): { isMatch: boolean; token: 'btc' | 'eth' | null } {
+  if (event.type !== 'created') return { isMatch: false, token: null };
+
+  const data = event.data as any;
+  const title = ((data.question || data.title || '') as string).toLowerCase();
+  const description = ((data.description || '') as string).toLowerCase();
+
+  // Check if it's a BTC or ETH market
+  let token: 'btc' | 'eth' | null = null;
+  if (CONFIG.marketKeywords.some(k => title.includes(k))) {
+    if (title.includes('btc') || title.includes('bitcoin')) token = 'btc';
+    else if (title.includes('eth') || title.includes('ethereum')) token = 'eth';
+  }
+
+  if (!token) return { isMatch: false, token: null };
+
+  // Check if it's a 15-minute UP/DOWN market
+  const hasTimeKeyword = CONFIG.timeKeywords.some(k => title.includes(k) || description.includes(k));
+  const hasUpdownKeyword = CONFIG.updownKeywords.some(k => title.includes(k) || description.includes(k));
+
+  return { isMatch: hasTimeKeyword && hasUpdownKeyword, token };
+}
+
+async function handleMarketCreated(event: MarketEvent): Promise<void> {
+  const { isMatch, token } = isBTCETH15mMarket(event);
+
+  if (isMatch && token) {
+    const data = event.data as any;
+    console.log(chalk.green(`✓ Discovered ${token.toUpperCase()} 15m market: ${event.conditionId.slice(0, 10)}...`));
+    console.log(chalk.dim(`  Question: ${data.question || data.title}`));
+
+    // Store discovered market
+    state.discoveredMarkets.set(token, {
+      conditionId: event.conditionId,
+      title: data.title || '',
+      question: data.question || '',
+    });
+
+    // Check if we have both BTC and ETH
+    if (state.discoveredMarkets.has('btc') && state.discoveredMarkets.has('eth')) {
+      const btcMarket = state.discoveredMarkets.get('btc')!;
+      const ethMarket = state.discoveredMarkets.get('eth')!;
+
+      console.log(chalk.cyan('\n🎯 Both markets found! Starting monitor...'));
+
+      // Unsubscribe from market events (no longer needed)
+      state.marketEventSubscription?.unsubscribe();
+
+      // Load markets and start monitoring
+      await startMonitoring(btcMarket.conditionId, ethMarket.conditionId);
+    }
+  }
+}
+
+async function startMonitoring(upMarketId: string, downMarketId: string): Promise<void> {
+  const sdk = state.sdk!;
+  if (!sdk) return;
+
+  // Load market data (get token IDs)
+  try {
+    const [upMarket, downMarket] = await Promise.all([
+      sdk.markets.getClobMarket(upMarketId),
+      sdk.markets.getClobMarket(downMarketId),
+    ]);
+
+    state.upMarket = {
+      conditionId: upMarket.conditionId,
+      yesTokenId: upMarket.tokens.find(t => t.outcome === 'Yes')?.tokenId || '',
+      noTokenId: upMarket.tokens.find(t => t.outcome === 'No')?.tokenId || '',
+    };
+
+    state.downMarket = {
+      conditionId: downMarket.conditionId,
+      yesTokenId: downMarket.tokens.find(t => t.outcome === 'Yes')?.tokenId || '',
+      noTokenId: downMarket.tokens.find(t => t.outcome === 'No')?.tokenId || '',
+    };
+
+    if (!state.upMarket.yesTokenId || !state.downMarket.yesTokenId) {
+      throw new Error('Missing token IDs in market data');
+    }
+
+    console.log(chalk.green('✓ Markets loaded, subscribing to orderbooks...'));
+    subscribeToMarkets(sdk);
+  } catch (error) {
+    console.error(chalk.red('✗ Failed to load markets'), chalk.red((error as Error).message));
+    // Keep listening for new markets
+  }
+}
+
+async function startAutoDiscovery(sdk: PolymarketSDK): Promise<void> {
+  console.log(chalk.cyan('🔍 Listening for new BTC/ETH 15m markets...'));
+  console.log(chalk.dim('  Waiting for market_created events (Ctrl+C to stop)'));
+
+  state.marketEventSubscription = sdk.realtime.subscribeMarketEvents({
+    onMarketEvent: (event) => {
+      if (event.type === 'created') {
+        handleMarketCreated(event);
+      }
+    },
+  });
 }
 
 // ===== WebSocket Subscriptions =====
@@ -301,11 +423,14 @@ async function shutdown(signal: string): Promise<void> {
   if (state.isShuttingDown) return;
   state.isShuttingDown = true;
 
-  // Unsubscribe
+  // Unsubscribe from orderbook subscriptions
   const subscriptions = (state as any).subscriptions || [];
   for (const sub of subscriptions) {
     sub.unsubscribe?.();
   }
+
+  // Unsubscribe from market events (auto-discover)
+  state.marketEventSubscription?.unsubscribe();
 
   // Disconnect
   state.sdk?.realtime.disconnect();
@@ -330,21 +455,26 @@ async function main(): Promise<void> {
   const sdk = new PolymarketSDK();
   state.sdk = sdk;
 
-  // Load markets
-  console.log(chalk.cyan('Loading markets...'));
-  await loadMarkets(sdk);
-  console.log(chalk.green('✓ Markets loaded'));
-  console.log(chalk.dim(`  UP market: ${state.upMarket?.conditionId?.slice(0, 10)}...`));
-  console.log(chalk.dim(`  DOWN market: ${state.downMarket?.conditionId?.slice(0, 10)}...`));
-
-  // Connect WebSocket
+  // Connect WebSocket first
   console.log(chalk.cyan('Connecting to WebSocket...'));
   sdk.realtime.connect();
 
-  sdk.realtime.on('connected', () => {
+  sdk.realtime.on('connected', async () => {
     console.log(chalk.green('✓ WebSocket connected'));
     state.reconnectAttempts = 0;
-    subscribeToMarkets(sdk);
+
+    if (CONFIG.autoDiscover) {
+      // Auto-discover mode: listen for market_created events
+      await startAutoDiscovery(sdk);
+    } else {
+      // Manual mode: load specified markets
+      await loadMarkets(sdk);
+      console.log(chalk.green('✓ Markets loaded'));
+      console.log(chalk.dim(`  UP market: ${state.upMarket?.conditionId?.slice(0, 10)}...`));
+      console.log(chalk.dim(`  DOWN market: ${state.downMarket?.conditionId?.slice(0, 10)}...`));
+      subscribeToMarkets(sdk);
+      console.log(chalk.cyan('Monitoring markets (Ctrl+C to stop)...'));
+    }
   });
 
   sdk.realtime.on('disconnected', () => {
@@ -352,7 +482,9 @@ async function main(): Promise<void> {
   });
 
   // Keep alive
-  console.log(chalk.cyan('Monitoring markets (Ctrl+C to stop)...'));
+  if (!CONFIG.autoDiscover) {
+    console.log(chalk.cyan('Waiting for WebSocket connection...'));
+  }
 }
 
 main().catch((error) => {
