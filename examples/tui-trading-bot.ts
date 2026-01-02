@@ -728,6 +728,9 @@ async function discoverMarket(token: 'btc' | 'eth'): Promise<MarketData | null> 
       const expectedSlug = `${token}-updown-15m-${timestamp}`;
 
       const response = await fetch(`https://gamma-api.polymarket.com/markets?slug=${expectedSlug}`);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
       const data = await response.json();
 
       if (data?.[0]) {
@@ -758,7 +761,15 @@ async function discoverMarket(token: 'btc' | 'eth'): Promise<MarketData | null> 
     }
     return null;
   } catch (error) {
-    console.error(`✗ ${token.toUpperCase()} discovery failed:`, (error as Error).message);
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    console.error(`✗ ${token.toUpperCase()} discovery failed: ${errorMsg}`);
+    // Provide helpful hints for common errors
+    if (errorMsg.includes('fetch failed') || errorMsg.includes('ECONNREFUSED')) {
+      console.error(`   Hint: Check if proxy settings (${process.env.http_proxy || process.env.https_proxy || 'none'}) are correct`);
+    }
+    if (errorMsg.includes('ENOTFOUND')) {
+      console.error(`   Hint: DNS resolution failed - check your internet connection`);
+    }
     return null;
   }
 }
@@ -934,19 +945,25 @@ async function main(): Promise<void> {
       console.log('✓ Trading initialized successfully');
       console.log('⚠️  REAL MONEY AT RISK!');
     } catch (error) {
-      console.error('✗ Failed to initialize trading:', error);
-      if (error instanceof Error && error.message.includes('Could not create api key')) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.error('✗ Failed to initialize trading:', errorMsg);
+      if (errorMsg.includes('Could not create api key')) {
         console.error('');
         console.error('   This usually means:');
         console.error('   1. Your private key is not linked to a Polymarket account');
         console.error('   2. Your IP is being blocked by Cloudflare');
         console.error('   3. Polymarket API is temporarily unavailable');
+        console.error('   4. Proxy settings in .env are interfering');
         console.error('');
-        console.error('   Solution: Use DRY_RUN=true for testing, or');
-        console.error('           use a wallet with active Polymarket account');
+        console.error('   Solutions:');
+        console.error('   - Use DRY_RUN=true for testing');
+        console.error('   - Remove proxy settings from .env (https_proxy, http_proxy, all_proxy)');
+        console.error('   - Use a wallet with active Polymarket account');
+        console.error('   - Try from a different IP/Network');
       }
       console.error('   Falling back to DRY_RUN mode');
       process.env.DRY_RUN = 'true';
+      // Continue in dry run mode instead of exiting
     }
   } else {
     console.log('✓ DRY-RUN mode - No real trades will be executed');
@@ -954,6 +971,7 @@ async function main(): Promise<void> {
   }
 
   // Discover markets
+  console.log('🔍 Discovering markets...');
   const [btcMarket, ethMarket] = await Promise.all([
     discoverMarket('btc'),
     discoverMarket('eth'),
@@ -961,6 +979,16 @@ async function main(): Promise<void> {
 
   if (!btcMarket || !ethMarket) {
     console.error('✗ Failed to discover markets');
+    console.error('   This could be due to:');
+    console.error('   - Network connectivity issues');
+    console.error('   - Proxy settings in .env interfering');
+    console.error('   - Polymarket API is down');
+    console.error('');
+    console.error('   Troubleshooting:');
+    console.error('   1. Check your internet connection');
+    console.error('   2. Remove proxy settings from .env if not needed');
+    console.error('   3. Try again in a few moments');
+    console.error('   4. Set DRY_RUN=true to test without API calls');
     process.exit(1);
   }
 
