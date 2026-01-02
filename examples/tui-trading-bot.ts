@@ -101,6 +101,11 @@ const state: {
     uiUpdate: NodeJS.Timeout | null;
     positionCheck: NodeJS.Timeout | null;
   };
+  // Track last entry time to prevent duplicate entries
+  lastEntryTime: {
+    btc: number;
+    eth: number;
+  };
 } = {
   markets: { btc: null, eth: null },
   sdk: null,
@@ -110,6 +115,7 @@ const state: {
   trades: [],
   totalPnl: 0,
   timers: { refreshCheck: null, uiUpdate: null, positionCheck: null },
+  lastEntryTime: { btc: 0, eth: 0 },
 };
 
 // ===== Blessed Screen Setup =====
@@ -469,8 +475,16 @@ function scheduleRender() {
 function shouldEnterPosition(market: MarketData): 'UP' | 'DOWN' | null {
   if (!market.inRange) return null;
 
+  const tokenKey = market.token.toLowerCase() as 'btc' | 'eth';
+
   // Check if we already have a position for this token
-  if (state.positions[market.token.toLowerCase() as 'btc' | 'eth']) {
+  if (state.positions[tokenKey]) {
+    return null;
+  }
+
+  // Debounce: Don't enter if we entered within last 5 seconds
+  const timeSinceLastEntry = Date.now() - state.lastEntryTime[tokenKey];
+  if (timeSinceLastEntry < 5000) {
     return null;
   }
 
@@ -491,6 +505,14 @@ function shouldEnterPosition(market: MarketData): 'UP' | 'DOWN' | null {
  */
 async function enterPosition(market: MarketData, side: 'UP' | 'DOWN'): Promise<void> {
   const tokenKey = market.token.toLowerCase() as 'btc' | 'eth';
+
+  // Double-check no position exists (prevent race condition)
+  if (state.positions[tokenKey]) {
+    return;
+  }
+
+  // Update last entry time immediately to prevent duplicate entries
+  state.lastEntryTime[tokenKey] = Date.now();
 
   // Calculate position size
   const entryPrice = side === 'UP' ? market.yesPrice : market.noPrice;
@@ -526,13 +548,26 @@ async function enterPosition(market: MarketData, side: 'UP' | 'DOWN'): Promise<v
       if (result.success) {
         console.log(`   ✓ Order placed: ${result.orderId || result.orderIds?.join(', ')}`);
       } else {
-        console.error(`   ✗ Order failed: ${result.errorMsg}`);
+        // Better error handling
+        const errorMsg = result.errorMsg || (typeof result === 'object' ? JSON.stringify(result).slice(0, 100) : 'Unknown error');
+        console.error(`   ✗ Order failed: ${errorMsg}`);
         // Remove position if order failed
         state.positions[tokenKey] = null;
+        // Reset entry time so we can try again
+        state.lastEntryTime[tokenKey] = 0;
       }
     } catch (error) {
-      console.error(`   ✗ Order error: ${error}`);
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      // Check for Cloudflare block
+      if (errorMsg.includes('403') || errorMsg.includes('Cloudflare')) {
+        console.error(`   ✗ Order blocked by Cloudflare (IP may be rate limited)`);
+      } else {
+        console.error(`   ✗ Order error: ${errorMsg}`);
+      }
+      // Remove position if order failed
       state.positions[tokenKey] = null;
+      // Reset entry time so we can try again
+      state.lastEntryTime[tokenKey] = 0;
     }
   }
 
@@ -624,11 +659,8 @@ async function exitPosition(position: Position, reason: string): Promise<void> {
   // If not dry run, place the exit order (sell)
   if (!DRY_RUN && state.sdk) {
     try {
-      const tokenId = position.side === 'UP' ? position.token === 'BTC' ? state.subscriptions.btc?.yes : state.subscriptions.eth?.yes : position.token === 'BTC' ? state.subscriptions.btc?.no : state.subscriptions.eth?.no;
-      if (!tokenId) {
-        console.error('   ✗ Cannot exit: token ID not found');
-        return;
-      }
+      // Get correct token ID from market data
+      const tokenId = position.side === 'UP' ? market.yesTokenId : market.noTokenId;
 
       const result = await state.sdk.tradingService.createMarketOrder({
         tokenId,
@@ -639,10 +671,16 @@ async function exitPosition(position: Position, reason: string): Promise<void> {
       if (result.success) {
         console.log(`   ✓ Exit order placed: ${result.orderId || result.orderIds?.join(', ')}`);
       } else {
-        console.error(`   ✗ Exit order failed: ${result.errorMsg}`);
+        const errorMsg = result.errorMsg || (typeof result === 'object' ? JSON.stringify(result).slice(0, 100) : 'Unknown error');
+        console.error(`   ✗ Exit order failed: ${errorMsg}`);
       }
     } catch (error) {
-      console.error(`   ✗ Exit order error: ${error}`);
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      if (errorMsg.includes('403') || errorMsg.includes('Cloudflare')) {
+        console.error(`   ✗ Exit order blocked by Cloudflare (IP may be rate limited)`);
+      } else {
+        console.error(`   ✗ Exit order error: ${errorMsg}`);
+      }
     }
   }
 
