@@ -60,8 +60,8 @@ const state: {
     eth: number;
   };
   subscriptions: {
-    btc: { yes: string; no: string; unsubscribe: () => void } | null;
-    eth: { yes: string; no: string; unsubscribe: () => void } | null;
+    btc: { yes: string; no: string; subscription: { unsubscribe: () => void } } | null;
+    eth: { yes: string; no: string; subscription: { unsubscribe: () => void } } | null;
   };
   trades: Trade[];
   totalPnl: number;
@@ -443,8 +443,8 @@ async function refreshMarket(token: 'btc' | 'eth'): Promise<boolean> {
 
   // P1-001: Clean up old subscription before creating new one
   const oldSubscription = state.subscriptions[tokenKey];
-  if (oldSubscription?.unsubscribe) {
-    oldSubscription.unsubscribe();
+  if (oldSubscription?.subscription) {
+    oldSubscription.subscription.unsubscribe();
     state.subscriptions[tokenKey] = null;
   }
 
@@ -452,8 +452,8 @@ async function refreshMarket(token: 'btc' | 'eth'): Promise<boolean> {
   state.markets[tokenKey] = newMarket;
   state.updateCounts[tokenKey] = 0;
 
-  // Re-subscribe to new market and store unsubscribe function
-  const unsubscribe = sdk.realtime.subscribeMarket(
+  // Re-subscribe to new market and store subscription object
+  const subscription = sdk.realtime.subscribeMarket(
     newMarket.yesTokenId,
     newMarket.noTokenId,
     {
@@ -469,7 +469,7 @@ async function refreshMarket(token: 'btc' | 'eth'): Promise<boolean> {
   state.subscriptions[tokenKey] = {
     yes: newMarket.yesTokenId,
     no: newMarket.noTokenId,
-    unsubscribe,
+    subscription,
   };
 
   console.log(`✓ ${token.toUpperCase()} switched to new market (ends ${new Date(newMarket.endTime).toLocaleTimeString()})`);
@@ -560,8 +560,8 @@ async function main(): Promise<void> {
     }
 
     // Unsubscribe from all markets
-    state.subscriptions.btc?.unsubscribe();
-    state.subscriptions.eth?.unsubscribe();
+    state.subscriptions.btc?.subscription.unsubscribe();
+    state.subscriptions.eth?.subscription.unsubscribe();
 
     // Disconnect WebSocket
     state.sdk?.realtime.disconnect();
@@ -601,8 +601,8 @@ async function main(): Promise<void> {
   sdk.realtime.connect();
 
   sdk.realtime.on('connected', () => {
-    // P1-001: Track and subscribe to BTC with unsubscribe function
-    const btcUnsubscribe = sdk.realtime.subscribeMarket(
+    // P1-001: Track and subscribe to BTC with subscription object
+    const btcSubscription = sdk.realtime.subscribeMarket(
       btcMarket.yesTokenId,
       btcMarket.noTokenId,
       {
@@ -617,11 +617,11 @@ async function main(): Promise<void> {
     state.subscriptions.btc = {
       yes: btcMarket.yesTokenId,
       no: btcMarket.noTokenId,
-      unsubscribe: btcUnsubscribe,
+      subscription: btcSubscription,
     };
 
-    // P1-001: Track and subscribe to ETH with unsubscribe function
-    const ethUnsubscribe = sdk.realtime.subscribeMarket(
+    // P1-001: Track and subscribe to ETH with subscription object
+    const ethSubscription = sdk.realtime.subscribeMarket(
       ethMarket.yesTokenId,
       ethMarket.noTokenId,
       {
@@ -636,7 +636,7 @@ async function main(): Promise<void> {
     state.subscriptions.eth = {
       yes: ethMarket.yesTokenId,
       no: ethMarket.noTokenId,
-      unsubscribe: ethUnsubscribe,
+      subscription: ethSubscription,
     };
   });
 
