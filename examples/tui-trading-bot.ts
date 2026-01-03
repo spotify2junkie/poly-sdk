@@ -531,9 +531,7 @@ async function enterPosition(market: MarketData, side: 'UP' | 'DOWN'): Promise<v
   // Store position
   state.positions[tokenKey] = position;
 
-  // Log the entry
-  console.log(`📈 ${DRY_RUN ? '[DRY-RUN] ' : ''}${market.token} ${side} ENTRY`);
-  console.log(`   Price: ${(entryPrice * 100).toFixed(1)}%  Size: ${size.toFixed(2)} shares ($${POSITION_SIZE.toFixed(2)})`);
+  // Entry info shown in UI, skip console.log
 
   // If not dry run, place the actual order
   if (!DRY_RUN && state.sdk) {
@@ -546,7 +544,7 @@ async function enterPosition(market: MarketData, side: 'UP' | 'DOWN'): Promise<v
       });
 
       if (result.success) {
-        console.log(`   ✓ Order placed: ${result.orderId || result.orderIds?.join(', ')}`);
+        // Order confirmation shown in UI, skip console.log
       } else {
         // Better error handling
         const errorMsg = result.errorMsg || (typeof result === 'object' ? JSON.stringify(result).slice(0, 100) : 'Unknown error');
@@ -649,12 +647,7 @@ async function exitPosition(position: Position, reason: string): Promise<void> {
   // Update total PnL
   state.totalPnl += pnl;
 
-  // Log the exit
-  const pnlSign = pnl >= 0 ? '+' : '';
-  const pnlColor = pnl >= 0 ? '✓' : '✗';
-  console.log(`${pnlColor} ${DRY_RUN ? '[DRY-RUN] ' : ''}${position.token} ${position.side} EXIT (${reason})`);
-  console.log(`   Entry: ${(position.entryPrice * 100).toFixed(1)}%  Exit: ${(exitPrice * 100).toFixed(1)}%`);
-  console.log(`   PnL: ${pnlSign}$${pnl.toFixed(2)}`);
+  // Exit info shown in UI, skip console.log
 
   // If not dry run, place the exit order (sell)
   if (!DRY_RUN && state.sdk) {
@@ -669,7 +662,7 @@ async function exitPosition(position: Position, reason: string): Promise<void> {
       });
 
       if (result.success) {
-        console.log(`   ✓ Exit order placed: ${result.orderId || result.orderIds?.join(', ')}`);
+        // Exit order confirmation shown in UI, skip console.log
       } else {
         const errorMsg = result.errorMsg || (typeof result === 'object' ? JSON.stringify(result).slice(0, 100) : 'Unknown error');
         console.error(`   ✗ Exit order failed: ${errorMsg}`);
@@ -788,11 +781,11 @@ async function refreshMarket(token: 'btc' | 'eth'): Promise<boolean> {
   const oldMarket = state.markets[token];
   if (!oldMarket) return false;
 
-  console.log(`🔄 Refreshing ${token.toUpperCase()} market...`);
+  // Refresh status shown in UI, skip console.log
 
   const newMarket = await discoverMarket(token);
   if (!newMarket) {
-    console.log(`⚠️  No new ${token.toUpperCase()} market found`);
+    // No market found, skip console.log
     return false;
   }
 
@@ -833,7 +826,7 @@ async function refreshMarket(token: 'btc' | 'eth'): Promise<boolean> {
     subscription,
   };
 
-  console.log(`✓ ${token.toUpperCase()} switched to new market (ends ${new Date(newMarket.endTime).toLocaleTimeString()})`);
+  // Market switch status shown in UI, skip console.log
 
   // Update UI
   updateSignalBox(token === 'BTC' ? btcSignalBox : ethSignalBox, newMarket, token);
@@ -875,7 +868,7 @@ function processOrderbook(book: OrderbookSnapshot, market: MarketData) {
   const count = state.updateCounts[tokenKey];
 
   if (count === 1 && bids.length > 0) {
-    console.log(`✓ ${market.token}: Connected`);
+    // Connection status shown in UI, skip console.log
   }
 
   // Check for entry signal (only if no position exists)
